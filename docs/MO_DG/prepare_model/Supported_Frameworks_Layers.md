@@ -537,7 +537,7 @@ Standard PaddlePaddle\* Operators:
 | clip | No |
 | concat | No |
 | conv2d | Only supports 'NCHW' layout |
-| depthwise_conv2d | No |
+| depthwise_conv2d | Only supports 'NCHW' layout |
 | elementwise_add | No |
 | elementwise_div | No |
 | elementwise_max | No |
