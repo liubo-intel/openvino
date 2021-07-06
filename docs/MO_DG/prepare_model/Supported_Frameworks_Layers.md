@@ -530,13 +530,13 @@ Standard PaddlePaddle\* Operators:
 | arg_max | No |
 | assign_value | No |
 | batch_norm | No |
-| bilinear_interp | No |
-| bilinear_interp_v2 | No |
+| bilinear_interp | only supports the same data_layout |
+| bilinear_interp_v2 | only supports the same data_layout |
 | bmm | No |
 | cast | No |
 | clip | No |
 | concat | No |
-| conv2d | No |
+| conv2d | only supports 'NCHW' layout |
 | depthwise_conv2d | No |
 | elementwise_add | No |
 | elementwise_div | No |
@@ -547,7 +547,7 @@ Standard PaddlePaddle\* Operators:
 | elementwise_sub | No |
 | equal | No |
 | expand_v2 | No |
-| fill_constant_batch_size_like | No |
+| fill_constant_batch_size_like | only supports 'FP32' data type |
 | fill_constant | No |
 | flatten_contiguous_range | No |
 | greater_equal | No |
@@ -556,28 +556,29 @@ Standard PaddlePaddle\* Operators:
 | leaky_relu | No |
 | log | No |
 | logical_not | No |
+| lstm | Not specify 'SEQ_LEN' for each batch |
 | matmul | No |
 | matrix_nms | No |
 | max_pool2d_with_index | No |
 | mul | No |
 | multiclass_nms | No |
-| nearest_interp | No |
-| nearest_interp_v2 | No |
-| pad3d | No |
+| nearest_interp | only supports the same data_layout |
+| nearest_interp_v2 | only supports the same data_layout |
+| pad3d | Not support 'Circular' mode |
 | pow | No |
-| pool2d | No |
-| range | No |
+| pool2d | Not support 'NHWC' input data_layout |
+| range | only supports 'FP32' output data type |
 | relu | No |
 | relu6 | No |
 | reshape2 | No |
-| rnn | No |
+| rnn | only support 'LSTM' now |
 | scale | No |
 | shape | No |
-| slice | No |
+| slice | Not support 'tensor' type of 'starts' and 'ends' |
 | softmax | No |
 | sigmoid | No |
 | split | No |
 | squeeze2 | No |
 | transpose2 | No |
-| unsqueeze2 | No |
+| unsqueeze2 | Only support 'int32_t' input data type |
 | yolo_box | No |
