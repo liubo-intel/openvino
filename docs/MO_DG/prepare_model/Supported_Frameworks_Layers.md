@@ -530,8 +530,8 @@ Standard PaddlePaddle\* Operators:
 | arg_max | No |
 | assign_value | No |
 | batch_norm | No |
-| bilinear_interp | only supports the same data_layout |
-| bilinear_interp_v2 | only supports the same data_layout |
+| bilinear_interp | Only supports the same data_layout |
+| bilinear_interp_v2 | Only supports the same data_layout |
 | bmm | No |
 | cast | No |
 | clip | No |
