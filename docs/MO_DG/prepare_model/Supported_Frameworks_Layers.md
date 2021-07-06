@@ -521,83 +521,130 @@ Standard ONNX\* operators:
 | Xor | No |
 
 
-## PaddlePaddle\* Supported Symbols
+## PaddlePaddle\* Supported Operators
 
-Standard PaddlePaddle\* symbols:
+Standard PaddlePaddle\* Operators:
 
-| Symbol Name in PaddlePaddle\*| Limitations|
+| Operator Name in PaddlePaddle\*| Limitations|
 | :----------| :----------|
-| _Plus | No |
-| _contrib_MultiBoxDetection | "force_suppress" = 1 is not supported, non-default variances are not supported |
-| _contrib_MultiBoxPrior | No |
-| _contrib_Proposal | No |
-| _copy | Not needed for inference |
-| _minus_scalar | No |
-| _mul_scalar | No |
-| _arange | No |
-| _contrib_AdaptiveAvgPooling2D | Converted to the Average Pooling with fixed paddings |
-| _maximum | No |
-| _minimum | No |
-| _np_roll | No |
-| add_n | No |
-| arccosh | No |
-| arcsinh | No |
-| arctanh | No |
-| broadcast_add | No |
-| broadcast_mul | No |
-| cumsum | No |
-| div_scalar | No |
-| elementwise_sub | No |
-| elemwise_add | No |
-| elemwise_mul | No |
-| exp | No |
-| expand_dims | No |
-| greater_scalar | No |
-| minus_scalar | No |
-| null | Not needed for inference |
-| repeat | No |
-| rnn | No |
-| rnn_param_concat | No |
-| round | No |
-| sigmoid | No |
-| slice | No |
-| slice_axis | No |
-| slice_channel | No |
-| slice_like | No |
-| stack | No |
-| swapaxis | No |
-| tile | No |
-| transpose | No |
-| zeros | No |
-| Activation | supported "act_type" = "relu", "sigmoid", "softrelu" or "tanh" |
-| BatchNorm | No |
+| Abs | No |
+| Acos | No |
+| Acosh | No |
+| Add | No |
+| Affine | No |
+| ArgMax | No |
+| ArgMin | No |
+| Asin | No |
+| Asinh | No |
+| Atan | No |
+| Atanh | No |
+| AveragePool | No |
+| BatchMatMul | No |
+| BatchNormalization | No |
+| Cast | No |
+| Ceil | No |
+| Clip | No |
 | Concat | No |
-| Convolution | No |
-| Crop | "center_crop" = 1 is not supported |
-| Custom | [Custom Layers in the Model Optimizer](customize_model_optimizer/Customize_Model_Optimizer.md) |
-| Deconvolution | No |
-| DeformableConvolution | No |
-| DeformablePSROIPooling | No |
+| Constant | No |
+| ConstantFill | No |
+| ConstantOfShape | No |
+| Conv | No |
+| ConvTranspose |  |
+| Cos | No |
+| Cosh | No |
+| Crop | No |
+| CumSum | No |
+| DequantizeLinear | No |
+| DetectionOutput (Intel experimental) | No |
+| Div | No |
 | Dropout | Not needed for inference |
-| ElementWiseSum | No |
-| Embedding | No |
+| Elu | No |
+| Equal | No |
+| Erf | No |
+| Expand | No |
+| FakeQuantize (Intel experimental) | No |
+| Fill | No |
 | Flatten | No |
-| FullyConnected | No |
-| InstanceNorm | No |
-| L2Normalization | only 4D input is supported |
+| Floor | No |
+| GRU | No |
+| Gather | No |
+| GatherElements | Doesn't work with negative indices |
+| GatherND | No |
+| GatherTree | No |
+| Gemm | No |
+| GlobalAveragePool | No |
+| GlobalMaxPool | No |
+| Greater | No |
+| GreaterEqual | No |
+| HardSigmoid | No |
+| Identity | Not needed for inference |
+| ImageScaler | No |
 | LRN | No |
-| LeakyReLU | supported "act_type" = "prelu", "elu", "leaky", "gelu" |
+| LSTM | Peepholes are not supported |
+| LeakyRelu | No |
+| Less | No |
+| LessEqual | No |
+| Log | No |
+| LogicalAnd | No |
+| LogicalOr | No |
+| LogSoftmax | No |
+| Loop | No |
+| MatMul | No |
+| MaxPool | No |
+| MeanVarianceNormalization | Reduction over the batch dimension is not supported, reduction over all dimensions except batch and channel ones is obligatory |
+| Min | No |
+| Mul | No |
+| Neg | No |
+| NonMaxSuppression | No |
+| NonZero | No |
+| Not | No |
+| NotEqual | No |
+| OneHot | No |
 | Pad | No |
-| Pooling | No |
-| ROIPooling | No |
-| ReLU | No |
+| Pow | No |
+| PriorBox (Intel experimental) | No |
+| QuantizeLinear | No |
+| RNN | No |
+| ROIAlign | No |
+| Range | No |
+| Reciprocal | No |
+| ReduceL1 | No |
+| ReduceL2 | No |
+| ReduceMax | No |
+| ReduceMean | No |
+| ReduceMin | No |
+| ReduceProd | No |
+| ReduceSum | No |
+| Relu | No |
 | Reshape | No |
-| ScaleShift | No |
-| SoftmaxActivation | No |
-| SoftmaxOutput | No |
-| SoftSign | No |
-| Take | The attribute 'mode' is not supported |
-| Tile | No |
-| UpSampling | No |
+| Resize | Coordinate transformation mode `tf_crop_and_resize` is not supported, `nearest` mode is not supported for 5D+ inputs. |
+| ReverseSequence | No |
+| Round | No |
+| Scatter | Supported if fuse-able to ScatterUpdate. MYRIAD only |
+| ScatterND | No |
+| ScatterElements | Supported if fuse-able to ScatterUpdate. MYRIAD only |
+| Select | No |
+| Shape | No |
+| Sigmoid | No |
+| Sign | No |
+| Sin | No |
+| Size | No |
+| Slice | No |
+| Softmax | No |
+| Softplus | No |
+| Softsign | No |
+| SpaceToDepth | No |
+| Sqrt | No |
+| Squeeze | The case when squeeze axis is not specified is not supported |
+| Sub | No |
+| Sum | No |
+| Tan | No |
+| Tanh | No |
+| ThresholdedRelu | No |
+| TopK | No |
+| Transpose | No |
+| Unsqueeze | No |
+| Upsample | No |
 | Where | No |
+| Xor | No |
 
