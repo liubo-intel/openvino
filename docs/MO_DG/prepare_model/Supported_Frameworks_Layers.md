@@ -536,7 +536,7 @@ Standard PaddlePaddle\* Operators:
 | cast | No |
 | clip | No |
 | concat | No |
-| conv2d | only supports 'NCHW' layout |
+| conv2d | Only supports 'NCHW' layout |
 | depthwise_conv2d | No |
 | elementwise_add | No |
 | elementwise_div | No |
@@ -547,7 +547,7 @@ Standard PaddlePaddle\* Operators:
 | elementwise_sub | No |
 | equal | No |
 | expand_v2 | No |
-| fill_constant_batch_size_like | only supports 'FP32' data type |
+| fill_constant_batch_size_like | Only supports 'FP32' data type |
 | fill_constant | No |
 | flatten_contiguous_range | No |
 | greater_equal | No |
@@ -562,16 +562,16 @@ Standard PaddlePaddle\* Operators:
 | max_pool2d_with_index | No |
 | mul | No |
 | multiclass_nms | No |
-| nearest_interp | only supports the same data_layout |
-| nearest_interp_v2 | only supports the same data_layout |
+| nearest_interp | Only supports the same data_layout |
+| nearest_interp_v2 | Only supports the same data_layout |
 | pad3d | Not support 'Circular' mode |
 | pow | No |
 | pool2d | Not support 'NHWC' input data_layout |
-| range | only supports 'FP32' output data type |
+| range | Only supports 'FP32' output data type |
 | relu | No |
 | relu6 | No |
 | reshape2 | No |
-| rnn | only support 'LSTM' now |
+| rnn | Only support 'LSTM' Mode now |
 | scale | No |
 | shape | No |
 | slice | Not support 'tensor' type of 'starts' and 'ends' |
