@@ -519,3 +519,85 @@ Standard ONNX\* operators:
 | Upsample | No |
 | Where | No |
 | Xor | No |
+
+
+## PaddlePaddle\* Supported Symbols
+
+Standard PaddlePaddle\* symbols:
+
+| Symbol Name in PaddlePaddle\*| Limitations|
+| :----------| :----------|
+| _Plus | No |
+| _contrib_MultiBoxDetection | "force_suppress" = 1 is not supported, non-default variances are not supported |
+| _contrib_MultiBoxPrior | No |
+| _contrib_Proposal | No |
+| _copy | Not needed for inference |
+| _minus_scalar | No |
+| _mul_scalar | No |
+| _arange | No |
+| _contrib_AdaptiveAvgPooling2D | Converted to the Average Pooling with fixed paddings |
+| _maximum | No |
+| _minimum | No |
+| _np_roll | No |
+| add_n | No |
+| arccosh | No |
+| arcsinh | No |
+| arctanh | No |
+| broadcast_add | No |
+| broadcast_mul | No |
+| cumsum | No |
+| div_scalar | No |
+| elementwise_sub | No |
+| elemwise_add | No |
+| elemwise_mul | No |
+| exp | No |
+| expand_dims | No |
+| greater_scalar | No |
+| minus_scalar | No |
+| null | Not needed for inference |
+| repeat | No |
+| rnn | No |
+| rnn_param_concat | No |
+| round | No |
+| sigmoid | No |
+| slice | No |
+| slice_axis | No |
+| slice_channel | No |
+| slice_like | No |
+| stack | No |
+| swapaxis | No |
+| tile | No |
+| transpose | No |
+| zeros | No |
+| Activation | supported "act_type" = "relu", "sigmoid", "softrelu" or "tanh" |
+| BatchNorm | No |
+| Concat | No |
+| Convolution | No |
+| Crop | "center_crop" = 1 is not supported |
+| Custom | [Custom Layers in the Model Optimizer](customize_model_optimizer/Customize_Model_Optimizer.md) |
+| Deconvolution | No |
+| DeformableConvolution | No |
+| DeformablePSROIPooling | No |
+| Dropout | Not needed for inference |
+| ElementWiseSum | No |
+| Embedding | No |
+| Flatten | No |
+| FullyConnected | No |
+| InstanceNorm | No |
+| L2Normalization | only 4D input is supported |
+| LRN | No |
+| LeakyReLU | supported "act_type" = "prelu", "elu", "leaky", "gelu" |
+| Pad | No |
+| Pooling | No |
+| ROIPooling | No |
+| ReLU | No |
+| Reshape | No |
+| ScaleShift | No |
+| SoftmaxActivation | No |
+| SoftmaxOutput | No |
+| SoftSign | No |
+| Take | The attribute 'mode' is not supported |
+| Tile | No |
+| UpSampling | No |
+| Where | No |
+
