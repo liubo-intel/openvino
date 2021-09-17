@@ -8,6 +8,9 @@
 #include "ngraph/pass/manager.hpp"
 #include "shared_utils.hpp"
 
+#include <iostream>  
+#include <fstream>  
+
 using namespace ngraph;
 
 NGRAPH_SUPPRESS_DEPRECATED_START
@@ -260,6 +263,9 @@ testing::AssertionResult
 {
     auto comparison_result = testing::AssertionSuccess();
 
+    std::ofstream outfile;
+    outfile.open("/mnt/sdb1-liu/my_project/my_prior_box_data.txt");
+
     for (const auto& output : m_network_outputs)
     {
         if (comparison_result == testing::AssertionFailure())
@@ -276,8 +282,22 @@ testing::AssertionResult
         {
         case InferenceEngine::Precision::FP32:
         {
-            const auto test_results =
+            auto test_results =
                 extract_test_results<float>(computed_output_blob, expected_output_blob);
+            
+            outfile << "computed_output: " << std::endl;
+            for (std::vector<float>::size_type i=0;i!=(test_results.first.size());i++)
+            {
+                outfile << test_results.first[i] << ", ";
+            }
+            outfile << std::endl;
+            outfile << "expected_output: " << std::endl;
+            for (std::vector<float>::size_type i=0;i!=(test_results.second.size());i++)
+            {
+                outfile << test_results.second[i] << ", ";
+            }
+            outfile.close();
+ 
             comparison_result =
                 test::compare_with_tolerance(test_results.first, test_results.second, tolerance);
             break;

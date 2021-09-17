@@ -162,21 +162,42 @@ void prior_box(const T* data, const T* img, float* dst_data, const Shape& out_sh
                 box_height = min_size[ms_idx] * 0.5f;
                 calculate_data(center_x, center_y, box_width, box_height, false);
 
-                if (attrs.max_size.size() > ms_idx) {
-                    box_width = box_height = std::sqrt(min_size[ms_idx] * attrs.max_size[ms_idx]) * 0.5f;
-                    calculate_data(center_x, center_y, box_width, box_height, false);
-                }
+                if (attrs.min_max_aspect_ratios_order) {
+                    if (attrs.max_size.size() > ms_idx) {
+                        box_width = box_height = std::sqrt(min_size[ms_idx] * attrs.max_size[ms_idx]) * 0.5f;
+                        calculate_data(center_x, center_y, box_width, box_height, false);
+                    }
 
-                if (attrs.scale_all_sizes || (!attrs.scale_all_sizes && (ms_idx == min_size.size() - 1))) {
-                    size_t s_idx = attrs.scale_all_sizes ? ms_idx : 0;
-                    for (float ar : aspect_ratios) {
-                        if (std::fabs(ar - 1.0f) < 1e-6) {
-                            continue;
+                    if (attrs.scale_all_sizes || (!attrs.scale_all_sizes && (ms_idx == min_size.size() - 1))) {
+                        size_t s_idx = attrs.scale_all_sizes ? ms_idx : 0;
+                        for (float ar : aspect_ratios) {
+                            if (std::fabs(ar - 1.0f) < 1e-6) {
+                                continue;
+                            }
+
+                            ar = std::sqrt(ar);
+                            box_width = min_size[s_idx] * 0.5f * ar;
+                            box_height = min_size[s_idx] * 0.5f / ar;
+                            calculate_data(center_x, center_y, box_width, box_height, false);
                         }
+                    }
+                } else {
+                    if (attrs.scale_all_sizes || (!attrs.scale_all_sizes && (ms_idx == min_size.size() - 1))) {
+                        size_t s_idx = attrs.scale_all_sizes ? ms_idx : 0;
+                        for (float ar : aspect_ratios) {
+                            if (std::fabs(ar - 1.0f) < 1e-6) {
+                                continue;
+                            }
 
-                        ar = std::sqrt(ar);
-                        box_width = min_size[s_idx] * 0.5f * ar;
-                        box_height = min_size[s_idx] * 0.5f / ar;
+                            ar = std::sqrt(ar);
+                            box_width = min_size[s_idx] * 0.5f * ar;
+                            box_height = min_size[s_idx] * 0.5f / ar;
+                            calculate_data(center_x, center_y, box_width, box_height, false);
+                        }
+                    }
+
+                    if (attrs.max_size.size() > ms_idx) {
+                        box_width = box_height = std::sqrt(min_size[ms_idx] * attrs.max_size[ms_idx]) * 0.5f;
                         calculate_data(center_x, center_y, box_width, box_height, false);
                     }
                 }

@@ -18,6 +18,7 @@ struct PriorBoxAttrs {
     // offset           Box offset relative to top center of image
     // variance         Values to adjust prior boxes with
     // scale_all_sizes  Scale all sizes
+    // min_max_aspect_ratios_order output prior box is in order of [min, max, aspect_ratios], which is consistent with Caffe.
     std::vector<float> min_size;
     std::vector<float> max_size;
     std::vector<float> aspect_ratio;
@@ -30,6 +31,7 @@ struct PriorBoxAttrs {
     float offset = 0.0f;
     std::vector<float> variance;
     bool scale_all_sizes = true;
+    bool min_max_aspect_ratios_order = true;
 };
 
 namespace v0 {
@@ -64,6 +66,39 @@ private:
     PriorBoxAttrs m_attrs;
 };
 }  // namespace v0
+
+namespace v8 {
+/// \brief Layer which generates prior boxes of specified sizes, support [min, aspect_ratios, max] output prior box order
+/// normalized to input image size
+class NGRAPH_API PriorBox : public Op {
+public:
+    NGRAPH_RTTI_DECLARATION;
+
+    PriorBox() = default;
+    /// \brief Constructs a PriorBox operation
+    ///
+    /// \param layer_shape    Shape of layer for which prior boxes are computed
+    /// \param image_shape    Shape of image to which prior boxes are scaled
+    /// \param attrs          PriorBox attributes
+    PriorBox(const Output<Node>& layer_shape, const Output<Node>& image_shape, const PriorBoxAttrs& attrs);
+
+    void validate_and_infer_types() override;
+    virtual std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& new_args) const override;
+
+    static int64_t number_of_priors(const PriorBoxAttrs& attrs);
+
+    static std::vector<float> normalized_aspect_ratio(const std::vector<float>& aspect_ratio, bool flip);
+    const PriorBoxAttrs& get_attrs() const {
+        return m_attrs;
+    }
+    bool visit_attributes(AttributeVisitor& visitor) override;
+    bool evaluate(const HostTensorVector& outputs, const HostTensorVector& inputs) const override;
+    bool has_evaluate() const override;
+
+private:
+    PriorBoxAttrs m_attrs;
+};
+}  // namespace v8
 using v0::PriorBox;
 }  // namespace op
 }  // namespace ngraph

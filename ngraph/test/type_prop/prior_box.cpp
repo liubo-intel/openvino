@@ -17,7 +17,7 @@ TEST(type_prop, prior_box1) {
 
     auto layer_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {32, 32});
     auto image_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {300, 300});
-    auto pb = std::make_shared<op::PriorBox>(layer_shape, image_shape, attrs);
+    auto pb = std::make_shared<op::v0::PriorBox>(layer_shape, image_shape, attrs);
     ASSERT_EQ(pb->get_shape(), (Shape{2, 20480}));
 }
 
@@ -30,7 +30,7 @@ TEST(type_prop, prior_box2) {
 
     auto layer_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {32, 32});
     auto image_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {300, 300});
-    auto pb = std::make_shared<op::PriorBox>(layer_shape, image_shape, attrs);
+    auto pb = std::make_shared<op::v0::PriorBox>(layer_shape, image_shape, attrs);
     ASSERT_EQ(pb->get_shape(), (Shape{2, 32768}));
 }
 
@@ -43,6 +43,20 @@ TEST(type_prop, prior_box3) {
 
     auto layer_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {1, 1});
     auto image_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {300, 300});
-    auto pb = std::make_shared<op::PriorBox>(layer_shape, image_shape, attrs);
+    auto pb = std::make_shared<op::v8::PriorBox>(layer_shape, image_shape, attrs);
+    ASSERT_EQ(pb->get_shape(), (Shape{2, 16}));
+}
+
+TEST(type_prop, prior_box4) {
+    op::PriorBoxAttrs attrs;
+    attrs.min_size = {256.0f};
+    attrs.max_size = {315.0f};
+    attrs.aspect_ratio = {2.0f};
+    attrs.flip = true;
+    attrs.min_max_aspect_ratios_order = false;
+
+    auto layer_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {1, 1});
+    auto image_shape = op::Constant::create<int64_t>(element::i64, Shape{2}, {300, 300});
+    auto pb = std::make_shared<op::v8::PriorBox>(layer_shape, image_shape, attrs);
     ASSERT_EQ(pb->get_shape(), (Shape{2, 16}));
 }
