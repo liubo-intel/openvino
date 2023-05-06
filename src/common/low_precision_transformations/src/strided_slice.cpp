@@ -28,6 +28,7 @@ std::shared_ptr<opset1::Constant> stridedSliceDeqConstant(
 
     const auto stridedSlicePShape = strSlice->get_input_partial_shape(0);
     const size_t rank = stridedSlicePShape.rank().get_length();
+    auto constantPartialShape = constant->get_output_partial_shape(0);
     if (rank != constantShape.size()) {
         ngraph::Shape newConstantShape;
         if (ngraph::shape_size(constantShape) == 1) {
@@ -36,8 +37,7 @@ std::shared_ptr<opset1::Constant> stridedSliceDeqConstant(
             newConstantShape = constantShape;
 
             // case when constShape without batch
-            if ((constantShape.size() > 1) &&
-                (constantShape.size() < rank)) {
+            if ((constantShape.size() > 1) && (constantShape.size() < rank)) {
                 newConstantShape.insert(newConstantShape.begin(), 1);
             }
         }
@@ -45,7 +45,14 @@ std::shared_ptr<opset1::Constant> stridedSliceDeqConstant(
 
         const auto newConstant = fold<ngraph::opset1::Broadcast>(
             constant,
-            ngraph::opset1::Constant::create(ngraph::element::i32, { newConstantShape.size() }, newConstantShape));
+            ngraph::opset1::Constant::create(ngraph::element::i32, {newConstantShape.size()}, newConstantShape));
+        constant = ov::as_type_ptr<ngraph::opset1::Constant>(newConstant);
+    } else if (stridedSlicePShape.is_static() && !stridedSlicePShape.compatible(constantPartialShape)) {
+        ngraph::Shape newConstantShape = stridedSlicePShape.to_shape();
+        constantShape = newConstantShape;
+        const auto newConstant = fold<ngraph::opset1::Broadcast>(
+            constant,
+            ngraph::opset1::Constant::create(ngraph::element::i32, {newConstantShape.size()}, newConstantShape));
         constant = ov::as_type_ptr<ngraph::opset1::Constant>(newConstant);
     }
 
