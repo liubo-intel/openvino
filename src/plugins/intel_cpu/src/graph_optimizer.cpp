@@ -1401,12 +1401,7 @@ void GraphOptimizer::FuseConvolutionSumAndConvolutionSumActivation(Graph &graph)
                 peerNode = parent1;
             }
         }
-        if (peerNode->isConstant())
-            continue;
         auto sum = graphNode;
-
-        if (mergedConv->isConstant() && !sum->isConstant())
-            continue;
 
         auto lastNode = sum;
 
@@ -1430,8 +1425,6 @@ void GraphOptimizer::FuseConvolutionSumAndConvolutionSumActivation(Graph &graph)
                 isFusingSupported(graphNode, graphNode->getChildEdgeAt(0)->getChild())) {
             auto relu_shared = graphNode->getChildEdgeAt(0)->getChild();
             lastNode = relu_shared;
-            if (mergedConv->isConstant() && !lastNode->isConstant())
-                continue;
             sum->fuseInto(mergedConv);
         }
 
