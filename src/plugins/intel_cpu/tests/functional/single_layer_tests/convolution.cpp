@@ -835,6 +835,7 @@ const std::vector<CPUSpecificParams> CPUParams_1D = {
         conv_avx2_1D,
         conv_avx512_1D,
         conv_sse42_1D_nspc,
+        conv_avx2_1D_nspc_brgconv,
         conv_avx2_1D_nspc,
         conv_avx2_1D_nspc_brgconv,
         conv_avx512_1D_nspc,
@@ -940,6 +941,7 @@ const auto convParams_ExplicitPadding_2D_dilated = ::testing::Combine(
 );
 
 const std::vector<CPUSpecificParams> CPUParams_2D = {
+<<<<<<< HEAD
         conv_sse42_2D,
         conv_avx2_2D,
         conv_avx512_2D,
@@ -948,6 +950,16 @@ const std::vector<CPUSpecificParams> CPUParams_2D = {
         conv_avx2_2D_nspc_brgconv,
         conv_avx512_2D_nspc,
         conv_avx512_2D_nspc_brgconv
+=======
+        // conv_sse42_2D,
+        // conv_avx2_2D,
+        // conv_avx512_2D,
+        // conv_sse42_2D_nspc,
+        // conv_avx2_2D_nspc,
+        conv_avx2_2D_nspc_brgconv,
+        // conv_avx512_2D_nspc,
+        // conv_avx512_2D_nspc_brgconv
+>>>>>>> b77d8e6bd9 (brgemm avx2 support)
 };
 
 std::vector<InputShape> inputShapes2d_cache = {
