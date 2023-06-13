@@ -365,6 +365,7 @@ void Input::cloneBlobIfRequired() {
 
     auto weightCache = context->getWeightsCache();
     if (weightCache) {
+        needFlushDenormalsToZero = mayiuse(cpu_isa_t::avx512_core_amx) ? false : needFlushDenormalsToZero;
         MemoryPtr ptr = *weightCache->findOrCreate(blobKey(), cloneBlob);
         memoryPtr = std::const_pointer_cast<const Memory>(ptr);
     // IRs already have all subnormals flushed to zero, but in
