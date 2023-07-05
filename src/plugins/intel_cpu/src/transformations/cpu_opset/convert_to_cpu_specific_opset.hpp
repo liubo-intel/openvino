@@ -21,9 +21,11 @@
 #include "transformations/common_optimizations/reshape_sequence_fusion.hpp"
 #include "common/pass/ngram_fusion.hpp"
 #include "transformations/defs.hpp"
+#include "common/pass/reduce_reorder_for_past_key_value.hpp"
 
 #include "itt.hpp"
 
+#include "transformations/cpu_opset/common/op/fully_connected.hpp"
 namespace ov {
 namespace intel_cpu {
 
@@ -43,6 +45,9 @@ inline void ConvertToCPUSpecificOpset(std::shared_ptr<ngraph::Function> &nGraphF
     if (!ov::op::util::has_op_with_type<ngraph::op::FakeQuantize>(nGraphFunc)) {
         CPU_REGISTER_PASS_COMMON(manager, ReshapeFullyConnectedFusion);
     }
+
+    CPU_REGISTER_PASS_COMMON(manager, ReduceReorderForPastKeyValue);
+
     // after transformation "MoveEltwiseUpThroughDataMov" there can be Reshape sequences that should be eliminated or fused
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ReshapeSequenceFusion);
     CPU_REGISTER_PASS_COMMON(manager, ov::pass::ConstantFolding);
