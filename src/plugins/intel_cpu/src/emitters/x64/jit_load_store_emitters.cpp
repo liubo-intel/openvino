@@ -469,8 +469,10 @@ void jit_load_emitter::load_words_to_dword_extension(const Vmm &vmm, const Xbyak
     bool is_f16 = (prc == Precision::FP16);
     bool is_signed = prc.isSigned();
 
-    if (is_f16 && !mayiuse(cpu::x64::avx512_core_fp16))
-        IE_THROW() << "Load emitter in " << name_ << " only support fp16 on platform with avx512_core_fp16.";
+    // TODO: [WA]BKC has some issue, using the following way to check avx2_vnni_2
+    // if (is_f16 && !mayiuse(cpu::x64::avx512_core_fp16) && !mayiuse(cpu::x64::avx2_vnni_2))
+    //         IE_THROW() << "Load emitter in " << name_
+    //                    << " only support fp16 on platform with avx512_core_fp16 or avx2_vnni_2.";
 
     // Ensure extended double words fit inside Zmm (32/2(num) * 32 <= 512)
     // For Ymm register, load capacity is halved (16/2(num) * 32 <= 128)
@@ -486,53 +488,72 @@ void jit_load_emitter::load_words_to_dword_extension(const Vmm &vmm, const Xbyak
     auto ymm = Xbyak::Ymm(vmm.getIdx());
     auto zmm = Xbyak::Zmm(vmm.getIdx());
 
+    auto load_words_to_dword_base = [&]() {
+        load_bytes(xmm, reg, offset, load_size);
+        if (is_bf16) {
+            h->uni_vpmovzxwd(vmm, xmm);
+            h->uni_vpslld(vmm, vmm, 16);
+        } else if (is_f16) {
+            h->vcvtph2ps(ymm, xmm);
+        } else {
+            if (is_signed)
+                h->uni_vpmovsxwd(vmm, xmm);
+            else
+                h->uni_vpmovzxwd(vmm, xmm);
+        }
+    };
+
     // For load_size == 32/16/8, do load/extension in one go
     // including xmm/ymm tail block for ymm/zmm, so explicite xmm/ymm/zmm
     switch (load_size) {
-        case 32: {
-            if (is_bf16) {
-                h->uni_vpmovzxwd(zmm, ptr[reg + offset]);
-                h->uni_vpslld(zmm, zmm, 16);
-            } else if (is_f16) {
-                h->vcvtph2ps(zmm, ptr[reg + offset]);
-            } else {
-                if (is_signed)
-                    h->uni_vpmovsxwd(zmm, ptr[reg + offset]);
-                else
+    case 32: {
+        if (mayiuse(cpu::x64::avx512_core)) {
+                if (is_bf16) {
                     h->uni_vpmovzxwd(zmm, ptr[reg + offset]);
-            }
-            break;
+                    h->uni_vpslld(zmm, zmm, 16);
+                } else if (is_f16) {
+                    h->vcvtph2ps(zmm, ptr[reg + offset]);
+                } else {
+                    if (is_signed)
+                        h->uni_vpmovsxwd(zmm, ptr[reg + offset]);
+                    else
+                        h->uni_vpmovzxwd(zmm, ptr[reg + offset]);
+                }
+                break;
+        } else {
+                load_words_to_dword_base();
         }
-        case 16: {
-            if (is_bf16) {
+    }
+    case 16: {
+        if (is_bf16) {
                 h->uni_vpmovzxwd(ymm, ptr[reg + offset]);
                 h->uni_vpslld(ymm, ymm, 16);
-            } else if (is_f16) {
+        } else if (is_f16) {
                 h->vcvtph2ps(ymm, ptr[reg + offset]);
-            } else {
+        } else {
                 if (is_signed)
                     h->uni_vpmovsxwd(ymm, ptr[reg + offset]);
                 else
                     h->uni_vpmovzxwd(ymm, ptr[reg + offset]);
-            }
-            break;
         }
-        case 8: {
-            if (is_bf16) {
+        break;
+    }
+    case 8: {
+        if (is_bf16) {
                 h->uni_vpmovzxwd(xmm, ptr[reg + offset]);
                 h->uni_vpslld(xmm, xmm, 16);
-            } else if (is_f16) {
+        } else if (is_f16) {
                 h->vcvtph2ps(xmm, ptr[reg + offset]);
-            } else {
+        } else {
                 if (is_signed)
                     h->uni_vpmovsxwd(xmm, ptr[reg + offset]);
                 else
                     h->uni_vpmovzxwd(xmm, ptr[reg + offset]);
-            }
-            break;
         }
-        default: {
-            if (is_zmm && load_size > threshold_for_mask_emu_load) {
+        break;
+    }
+    default: {
+        if (is_zmm && load_size > threshold_for_mask_emu_load) {
                 unsigned int mask = 1;
                 mask = (mask << (load_size / 2)) - mask;
                 h->mov(Reg32(aux_gpr_idxs[0]), mask);
@@ -548,23 +569,12 @@ void jit_load_emitter::load_words_to_dword_extension(const Vmm &vmm, const Xbyak
                     else
                         h->uni_vpmovzxwd(vmm | k_mask | T_z, ptr[reg + offset]);
                 }
-            } else {
+        } else {
                 // xmm or ymm version
-                load_bytes(xmm, reg, offset, load_size);
-                if (is_bf16) {
-                    h->uni_vpmovzxwd(vmm, xmm);
-                    h->uni_vpslld(vmm, vmm, 16);
-                } else if (is_f16) {
-                    h->vcvtph2ps(ymm, xmm);
-                } else {
-                    if (is_signed)
-                        h->uni_vpmovsxwd(vmm, xmm);
-                    else
-                        h->uni_vpmovzxwd(vmm, xmm);
-                }
-            }
-            break;
+                load_words_to_dword_base();
         }
+        break;
+    }
     }
 }
 
@@ -1163,20 +1173,22 @@ void jit_store_emitter::store_dword_to_word_extension(const Xbyak::Reg64 &reg,
             store_bytes<Vmm>(reg, offset, store_num * 2);
         }
     } else if (is_f16) {
-        if (!mayiuse(cpu::x64::avx512_core_fp16))
-            IE_THROW() << "Store emitter in " << name_ << " only support fp16 on platform with avx512_core_fp16.";
-        // to avoid src vmm pollution
-        if (src_prc_ == Precision::FP32) {
-            // since avx512, zmm(fp32) => ymm(fp16)
-            ymm = Ymm(aux_vec_idxs[0]);
-        } // in I32 case, zmm&ymm is already in aux reg
+        if (mayiuse(cpu::x64::avx512_core_fp16)) {
+            // to avoid src vmm pollution
+            if (src_prc_ == Precision::FP32) {
+                // since avx512, zmm(fp32) => ymm(fp16)
+                ymm = Ymm(aux_vec_idxs[0]);
+            }  // in I32 case, zmm&ymm is already in aux reg
 
-        h->vcvtps2ph(ymm, zmm, 0x4);
-        if (store_num == 16) {
-            h->vmovdqu16(ptr[reg + offset], ymm);
+            h->vcvtps2ph(ymm, zmm, 0x4);
+            if (store_num == 16) {
+                h->vmovdqu16(ptr[reg + offset], ymm);
+            } else {
+                data_idx = static_cast<int>(ymm.getIdx());
+                store_bytes<Vmm>(reg, offset, store_num * 2);
+            }
         } else {
-            data_idx = static_cast<int>(ymm.getIdx());
-            store_bytes<Vmm>(reg, offset, store_num * 2);
+            store_dword_to_word_base();
         }
     } else {
         switch (store_num) {
