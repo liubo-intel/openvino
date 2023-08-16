@@ -160,9 +160,7 @@ void Config::readProperties(const std::map<std::string, std::string> &prop, Mode
             }
         } else if (key == PluginConfigParams::KEY_ENFORCE_BF16) {
             if (val == PluginConfigParams::YES) {
-                // if (mayiuse(avx512_core) || mayiuse(avx2_vnni_2)) {
-                // TODO: [WA]BKC has some issue, using the following way to check avx2_vnni_2
-                if (mayiuse(avx512_core) || InferenceEngine::with_cpu_x86_avx2_vnni_2()) {
+                if (mayiuse(avx512_core) || mayiuse(avx2_vnni_2)) {
                     inferencePrecision = ov::element::bf16;
                 } else {
                     IE_THROW() << "Platform doesn't support BF16 format";
@@ -176,16 +174,13 @@ void Config::readProperties(const std::map<std::string, std::string> &prop, Mode
             inferencePrecisionSetExplicitly = true;
         } else if (key == ov::hint::inference_precision.name()) {
             if (val == "bf16") {
-                // if (mayiuse(avx512_core) || mayiuse(avx2_vnni_2)) {
-                // TODO: [WA]BKC has some issue, using the following way to check avx2_vnni_2
-                if (mayiuse(avx512_core) || InferenceEngine::with_cpu_x86_avx2_vnni_2()) {
+                if (mayiuse(avx512_core) || mayiuse(avx2_vnni_2)) {
                     inferencePrecision = ov::element::bf16;
                     inferencePrecisionSetExplicitly = true;
                 }
             } else if (val == "f16") {
 #if defined(OPENVINO_ARCH_X86_64)
-                if (mayiuse(avx512_core_fp16) || mayiuse(avx512_core_amx_fp16) ||
-                    InferenceEngine::with_cpu_x86_avx2_vnni_2()) {
+                if (mayiuse(avx512_core_fp16) || mayiuse(avx512_core_amx_fp16) || mayiuse(avx2_vnni_2)) {
                     inferencePrecision = ov::element::f16;
                     inferencePrecisionSetExplicitly = true;
                 }
@@ -250,9 +245,7 @@ void Config::readProperties(const std::map<std::string, std::string> &prop, Mode
     // when both execution_mode and inference_precision are specified
     if (!inferencePrecisionSetExplicitly) {
         if (executionMode == ov::hint::ExecutionMode::PERFORMANCE) {
-            // if (mayiuse(avx512_core_bf16) || mayiuse(avx2_vnni_2))
-            // TODO: [WA]BKC has some issue, using the following way to check avx2_vnni_2
-            if (mayiuse(avx512_core_bf16) || InferenceEngine::with_cpu_x86_avx2_vnni_2())
+            if (mayiuse(avx512_core_bf16) || mayiuse(avx2_vnni_2))
                 inferencePrecision = ov::element::bf16;
             else
                 inferencePrecision = ov::element::f32;
@@ -327,4 +320,4 @@ void Config::updateProperties() {
 }
 
 }  // namespace intel_cpu
-}   // namespace ov
+}  // namespace ov
