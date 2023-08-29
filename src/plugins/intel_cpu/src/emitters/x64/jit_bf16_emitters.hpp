@@ -75,6 +75,8 @@ private:
             h->uni_vpackusdw(aux, aux, aux);
 
             if (host_isa_ == dnnl::impl::cpu::x64::cpu_isa_t::avx2) {
+                // [WA] remove this fix when PR-19358 merged
+                h->vpermq(Ymm(aux.getIdx()), Ymm(aux.getIdx()), 0xD8);  // 11 01 10 00
                 h->vextracti128(out, Ymm(aux.getIdx()), 0);
             } else {
                 h->uni_vmovups(out, aux);
