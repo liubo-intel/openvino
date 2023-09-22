@@ -1829,7 +1829,7 @@ void MVN::initSupportedPrimitiveDescriptors() {
 
     Precision inputPrecision = getOriginalInputPrecisionAtPort(0);
     Precision outputPrecision = getOriginalOutputPrecisionAtPort(0);
-    if (!mayiuse(avx512_core)) {
+    if (!mayiuse(avx512_core) && !mayiuse(avx2_vnni_2)) {
         if (outputPrecision == Precision::BF16)
             outputPrecision = Precision::FP32;
     }
