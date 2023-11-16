@@ -36,7 +36,7 @@ std::vector<std::string> disabledTestPatterns() {
         // TODO: Issue 43417 sporadic issue, looks like an issue in test, reproducible only on Windows platform
         R"(.*decomposition1_batch=5_hidden_size=10_input_size=30_.*tanh.relu.*_clip=0_linear_before_reset=1.*_targetDevice=CPU_.*)",
         // Skip platforms that do not support BF16 (i.e. sse, avx, avx2)
-        R"(.*(BF|bf)16.*(jit_avx(?!5)|jit_sse).*)",
+        // R"(.*(BF|bf)16.*(jit_avx(?!5)|jit_sse).*)",
         // TODO: Incorrect blob sizes for node BinaryConvolution_X
         R"(.*BinaryConvolutionLayerTest.*)",
         // TODO: 53618. BF16 gemm ncsp convolution crash
@@ -300,18 +300,21 @@ std::vector<std::string> disabledTestPatterns() {
     retVector.emplace_back(R"(.*LoadNetworkCompiledKernelsCacheTest.*CanCreateCacheDirAndDumpBinariesUnicodePath.*)");
 #endif
 
-    if (!InferenceEngine::with_cpu_x86_avx512_core()) {
+    if (!InferenceEngine::with_cpu_x86_avx512_core() && !InferenceEngine::with_cpu_x86_avx2_vnni_2()) {
         // on platforms which do not support bfloat16, we are disabling bf16 tests since there are no bf16 primitives,
         // tests are useless on such platforms
         retVector.emplace_back(R"(.*(BF|bf)16.*)");
         retVector.emplace_back(R"(.*bfloat16.*)");
+        retVector.emplace_back(R"(.*(BF|bf)16.*(jit_avx(?!5)|jit_sse).*)");
+    }
+    if (!InferenceEngine::with_cpu_x86_avx512_core()) {
         // MatMul in Snippets uses BRGEMM that is supported only on AVX512 platforms
         // Disabled Snippets MHA tests as well because MHA pattern contains MatMul
         retVector.emplace_back(R"(.*Snippets.*MHA.*)");
         retVector.emplace_back(R"(.*Snippets.*(MatMul|Matmul).*)");
     }
 #if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
-    if (!InferenceEngine::with_cpu_x86_avx512_core_fp16()) {
+    if (!InferenceEngine::with_cpu_x86_avx512_core_fp16() && !InferenceEngine::with_cpu_x86_avx2_vnni_2()) {
         // Skip fp16 tests for paltforms that don't support fp16 precision
         retVector.emplace_back(R"(.*INFERENCE_PRECISION_HINT=(F|f)16.*)");
     }

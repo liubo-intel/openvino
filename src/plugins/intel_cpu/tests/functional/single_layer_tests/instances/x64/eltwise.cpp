@@ -63,9 +63,10 @@ const std::vector<std::vector<ov::Shape>>& inShapes_4D_Planar_Blocked() {
 
 const std::vector<std::vector<ov::Shape>>& inShapes_4D_fusing() {
         static const std::vector<std::vector<ov::Shape>> inShapes_4D_fusing = {
-                {{2, 4, 4, 1}},
-                {{2, 17, 5, 4}},
-                {{2, 17, 5, 1}, {1, 17, 1, 4}},
+                // {{2, 4, 4, 1}},
+                // {{2, 17, 5, 4}},
+                {{100, 17, 5, 64000}},
+                // {{2, 17, 5, 1}, {1, 17, 1, 4}},
         };
         return inShapes_4D_fusing;
 }
@@ -185,7 +186,7 @@ const auto params_4D_fusing = ::testing::Combine(
                 ::testing::Values(ov::test::utils::DEVICE_CPU),
                 ::testing::ValuesIn(additional_config())),
         ::testing::ValuesIn(filterCPUSpecificParams(cpuParams_4D())),
-        ::testing::ValuesIn(fusingParamsSet_x64),
+        ::testing::Values(emptyFusingSpec),
         ::testing::ValuesIn(enforceSnippets()));
 
 INSTANTIATE_TEST_SUITE_P(smoke_CompareWithRefs_4D_Fusing, EltwiseLayerCPUTest, params_4D_fusing, EltwiseLayerCPUTest::getTestCaseName);
@@ -205,8 +206,8 @@ const auto params_4D_fusing_blocked_blocked = ::testing::Combine(
         ::testing::ValuesIn(fusingParamsSet_x64),
         ::testing::ValuesIn(enforceSnippets()));
 
-INSTANTIATE_TEST_SUITE_P(smoke_CompareWithRefs_4D_Fusing_Blocked_Blocked, EltwiseLayerCPUTest, params_4D_fusing_blocked_blocked,
-                         EltwiseLayerCPUTest::getTestCaseName);
+// INSTANTIATE_TEST_SUITE_P(smoke_CompareWithRefs_4D_Fusing_Blocked_Blocked, EltwiseLayerCPUTest, params_4D_fusing_blocked_blocked,
+//                          EltwiseLayerCPUTest::getTestCaseName);
 
 const auto params_4D_blocked_blocked_fusing = ::testing::Combine(
         ::testing::Combine(

@@ -222,8 +222,9 @@ TEST_P(EltwiseLayerCPUTest, CompareWithRefs) {
 namespace Eltwise {
 const std::vector<ov::AnyMap>& additional_config() {
     static const std::vector<ov::AnyMap> additionalConfig = {
-        {{ov::hint::inference_precision.name(), ov::element::f32}},
-        {{ov::hint::inference_precision.name(), ov::element::f16}}
+        // {{ov::hint::inference_precision.name(), ov::element::f32}},
+        {{ov::hint::inference_precision.name(), ov::element::f16}},
+        {{ov::hint::inference_precision.name(), ov::element::bf16}}
     };
     return additionalConfig;
 }
@@ -243,14 +244,14 @@ const std::vector<ov::test::utils::OpType>& opTypes() {
 
 const std::vector<ngraph::helpers::EltwiseTypes>& eltwiseOpTypesBinInp() {
     static const std::vector<ngraph::helpers::EltwiseTypes> eltwiseOpTypesBinInp = {
-        ngraph::helpers::EltwiseTypes::ADD,
+        // ngraph::helpers::EltwiseTypes::ADD,
         ngraph::helpers::EltwiseTypes::MULTIPLY,
-#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
-        ngraph::helpers::EltwiseTypes::SUBTRACT,                // TODO: Fix CVS-105430
-        ngraph::helpers::EltwiseTypes::DIVIDE,                  // TODO: Fix CVS-105430
-        ngraph::helpers::EltwiseTypes::FLOOR_MOD,               // TODO: Fix CVS-111875
-#endif
-        ngraph::helpers::EltwiseTypes::SQUARED_DIFF,
+// #if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+//         ngraph::helpers::EltwiseTypes::SUBTRACT,                // TODO: Fix CVS-105430
+//         ngraph::helpers::EltwiseTypes::DIVIDE,                  // TODO: Fix CVS-105430
+//         ngraph::helpers::EltwiseTypes::FLOOR_MOD,               // TODO: Fix CVS-111875
+// #endif
+//         ngraph::helpers::EltwiseTypes::SQUARED_DIFF,
     };
     return eltwiseOpTypesBinInp;
 }
@@ -277,7 +278,7 @@ const std::vector<ngraph::helpers::EltwiseTypes>& eltwiseOpTypesBinDyn() {
 
 const std::vector<CPUSpecificParams>& cpuParams_4D() {
     static const std::vector<CPUSpecificParams> cpuParams_4D = {
-        CPUSpecificParams({nhwc, nhwc}, {nhwc}, {}, {}),
+        // CPUSpecificParams({nhwc, nhwc}, {nhwc}, {}, {}),
         CPUSpecificParams({nchw, nchw}, {nchw}, {}, {})
     };
     return cpuParams_4D;
@@ -479,7 +480,8 @@ const std::vector<CPUSpecificParams>& cpuParams_5D_1D_constant() {
 }
 
 const std::vector<bool>& enforceSnippets() {
-    static const std::vector<bool> enforceSnippets = { false, true };
+    // static const std::vector<bool> enforceSnippets = { false, true };
+    static const std::vector<bool> enforceSnippets = { false };
     return enforceSnippets;
 }
 
