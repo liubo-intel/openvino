@@ -62,13 +62,18 @@ const std::vector<std::vector<ov::Shape>>& inShapes_4D_Planar_Blocked() {
 }
 
 const std::vector<std::vector<ov::Shape>>& inShapes_4D_fusing() {
-        static const std::vector<std::vector<ov::Shape>> inShapes_4D_fusing = {
-                // {{2, 4, 4, 1}},
-                // {{2, 17, 5, 4}},
-                {{100, 17, 5, 64000}},
-                // {{2, 17, 5, 1}, {1, 17, 1, 4}},
-        };
-        return inShapes_4D_fusing;
+    static const std::vector<std::vector<ov::Shape>> inShapes_4D_fusing = {
+        // {{2, 4, 4, 1}},
+        // {{2, 17, 5, 4}},
+        // {{100, 17, 5, 64000}},
+        {{2, 12, 5, 16}},
+        {{200, 12, 5, 16}},
+        {{2000, 12, 5, 16}},
+        {{20000, 12, 5, 16}},
+        {{200000, 12, 5, 16}},
+        // {{2, 17, 5, 1}, {1, 17, 1, 4}},
+    };
+    return inShapes_4D_fusing;
 }
 
 const std::vector<std::vector<ov::Shape>>& inShapes_4D_Blocked_Planar() {

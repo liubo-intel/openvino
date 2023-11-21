@@ -442,34 +442,122 @@ struct jit_uni_eltwise_generic : public jit_uni_eltwise_kernel, public jit_gener
             /********************************default ov version *****************************/
             L(main_loop_label);
             {
-            //     size_t loop_step = cpu_isa_traits<isa>::vlen / exec_prc.size();
+                size_t loop_step = cpu_isa_traits<isa>::vlen / exec_prc.size();
+
+                cmp(reg_work_amount, loop_step);
+                jl(main_loop_end_label, T_NEAR);
+
+                // load vector
+                Vmm vmm_1 = get_vmm_reg(0);
+                Vmm vmm_2 = get_vmm_reg(1);
+                if (jep.src_prc[0] == Precision::FP16) {
+                    vcvtph2ps(vmm_1, ptr[get_src_reg(0)]);
+                    vcvtph2ps(vmm_2, ptr[get_src_reg(1)]);
+                } else if (jep.src_prc[0] == Precision::BF16) {
+                    vpmovzxwd(vmm_1, ptr[get_src_reg(0)]);
+                    uni_vpslld(vmm_1, vmm_1, 16);
+                    vpmovzxwd(vmm_2, ptr[get_src_reg(1)]);
+                    uni_vpslld(vmm_2, vmm_2, 16);
+                } else if (jep.src_prc[0] == Precision::FP32) {
+                    uni_vmovups(vmm_1, ptr[get_src_reg(0)]);
+                    uni_vmovups(vmm_2, ptr[get_src_reg(1)]);
+                } else {
+                    OPENVINO_THROW("wrong input precision");
+                }
+                // computer
+                std::vector<size_t> in_idxs;
+                std::vector<size_t> aux_idxs;
+                std::vector<size_t> out_idxs;
+                in_idxs.push_back(vmm_1.getIdx());
+                in_idxs.push_back(vmm_2.getIdx());
+                out_idxs.push_back(vmm_dst.getIdx());
+                eltwise_emitter->emit_code(in_idxs, out_idxs, aux_idxs);
+                // store vector
+                if (jep.dst_prc == Precision::FP16) {
+                    vcvtps2ph(ptr[reg_dst], vmm_dst, 0x4);
+                } else if (jep.dst_prc == Precision::BF16) {
+                    Xmm xmm_dst = Xmm(vmm_dst.getIdx());
+                    uni_vcvtneps2bf16->emit_code({static_cast<size_t>(vmm_dst.getIdx())},
+                                                 {static_cast<size_t>(xmm_dst.getIdx())});
+                    uni_vmovdqu(ptr[reg_dst], xmm_dst);
+                } else if (jep.src_prc[0] == Precision::FP32) {
+                    uni_vmovups(ptr[reg_dst], vmm_dst);
+                } else {
+                    OPENVINO_THROW("wrong output precision");
+                }
+
+                for (size_t i = 0; i < jep.inputs_number; i++)
+                    if (jep.src_size[i] != 1)
+                        add(get_src_reg(i), jep.src_prc[i].size() * loop_step);
+
+                add(reg_dst, jep.dst_prc.size() * loop_step);
+                sub(reg_work_amount, loop_step);
+
+                jmp(main_loop_label, T_NEAR);
+            }
+
+            /********************************interleave instructions usage*****************************/
+            // L(main_loop_label);
+            // {
+            //     // double step length for odd + even each time
+            //     size_t loop_step = cpu_isa_traits<isa>::vlen / exec_prc.size() * 2;
+            //     size_t vlen_ = cpu_isa_traits<isa>::vlen / 2;
 
             //     cmp(reg_work_amount, loop_step);
             //     jl(main_loop_end_label, T_NEAR);
 
-            //     // load vector
-            //     Vmm vmm_1 = get_vmm_reg(0);
-            //     Vmm vmm_2 = get_vmm_reg(1);
+            //     // load_vector
+            //     Vmm vmm_even_1 = get_vmm_reg(0);
+            //     Vmm vmm_odd_1 = get_vmm_reg(1);
+            //     Vmm vmm_tmp_1 = get_aux_vmm(0);
+
+            //     Ymm ymm_even_1 = Ymm(vmm_even_1.getIdx());
+            //     Ymm ymm_odd_1 = Ymm(vmm_odd_1.getIdx());
+            //     Ymm ymm_aux0_1 = Ymm(vmm_tmp_1.getIdx());
+            //     Ymm ymm_aux1_1 = Ymm(vmm_odd_1.getIdx());
+
+            //     Vmm vmm_even_2 = get_vmm_reg(3);
+            //     Vmm vmm_odd_2 = get_vmm_reg(4);
+            //     Vmm vmm_tmp_2 = get_aux_vmm(1);
+
+            //     Ymm ymm_even_2 = Ymm(vmm_even_2.getIdx());
+            //     Ymm ymm_odd_2 = Ymm(vmm_odd_2.getIdx());
+            //     Ymm ymm_aux0_2 = Ymm(vmm_tmp_2.getIdx());
+            //     Ymm ymm_aux1_2 = Ymm(vmm_odd_2.getIdx());
+
             //     if (jep.src_prc[0] == Precision::FP16) {
-            //         vcvtph2ps(vmm_1, ptr[get_src_reg(0)]);
-            //         vcvtph2ps(vmm_2, ptr[get_src_reg(1)]);
+            //         vcvtneeph2ps(vmm_even_1, ptr[get_src_reg(0)]);
+            //         vcvtneoph2ps(vmm_odd_1, ptr[get_src_reg(0)]);
+            //         vcvtneeph2ps(vmm_even_2, ptr[get_src_reg(1)]);
+            //         vcvtneoph2ps(vmm_odd_2, ptr[get_src_reg(1)]);
             //     } else if (jep.src_prc[0] == Precision::BF16) {
-            //         vpmovzxwd(vmm_1, ptr[get_src_reg(0)]);
-            //         uni_vpslld(vmm_1, vmm_1, 16);
-            //         vpmovzxwd(vmm_2, ptr[get_src_reg(1)]);
-            //         uni_vpslld(vmm_2, vmm_2, 16);
+            //         vcvtneebf162ps(vmm_even_1, ptr[get_src_reg(0)]);
+            //         vcvtneobf162ps(vmm_odd_1, ptr[get_src_reg(0)]);
+            //         vcvtneebf162ps(vmm_even_2, ptr[get_src_reg(1)]);
+            //         vcvtneobf162ps(vmm_odd_2, ptr[get_src_reg(1)]);
             //     } else {
             //         OPENVINO_THROW("wrong input precision");
             //     }
-            //     // computer
+
+            //     vpunpckldq(ymm_aux0_1, ymm_even_1, ymm_odd_1);
+            //     vpunpckhdq(ymm_aux1_1, ymm_even_1, ymm_odd_1);
+            //     vperm2i128(ymm_even_1, ymm_aux0_1, ymm_aux1_1, 0x20);
+            //     vperm2i128(ymm_odd_1, ymm_aux0_1, ymm_aux1_1, 0x31);
+
+            //     vpunpckldq(ymm_aux0_2, ymm_even_2, ymm_odd_2);
+            //     vpunpckhdq(ymm_aux1_2, ymm_even_2, ymm_odd_2);
+            //     vperm2i128(ymm_even_2, ymm_aux0_2, ymm_aux1_2, 0x20);
+            //     vperm2i128(ymm_odd_2, ymm_aux0_2, ymm_aux1_2, 0x31);
+
+            //     // compute and store
             //     std::vector<size_t> in_idxs;
             //     std::vector<size_t> aux_idxs;
             //     std::vector<size_t> out_idxs;
-            //     in_idxs.push_back(vmm_1.getIdx());
-            //     in_idxs.push_back(vmm_2.getIdx());
+
+            //     in_idxs.push_back(vmm_even_1.getIdx());
+            //     in_idxs.push_back(vmm_even_2.getIdx());
             //     out_idxs.push_back(vmm_dst.getIdx());
             //     eltwise_emitter->emit_code(in_idxs, out_idxs, aux_idxs);
-            //     // store vector
             //     if (jep.dst_prc == Precision::FP16) {
             //         vcvtps2ph(ptr[reg_dst], vmm_dst, 0x4);
             //     } else if (jep.dst_prc == Precision::BF16) {
@@ -478,119 +566,36 @@ struct jit_uni_eltwise_generic : public jit_uni_eltwise_kernel, public jit_gener
             //                                      {static_cast<size_t>(xmm_dst.getIdx())});
             //         uni_vmovdqu(ptr[reg_dst], xmm_dst);
             //     } else {
-            //         OPENVINO_THROW("wrong output precision");
+            //         OPENVINO_THROW("wrong oupt precision");
+            //     }
+
+            //     std::vector<size_t> in_idxs2;
+            //     std::vector<size_t> aux_idxs2;
+            //     std::vector<size_t> out_idxs2;
+            //     in_idxs2.push_back(vmm_odd_1.getIdx());
+            //     in_idxs2.push_back(vmm_odd_2.getIdx());
+            //     out_idxs2.push_back(vmm_dst.getIdx());
+            //     eltwise_emitter->emit_code(in_idxs2, out_idxs2, aux_idxs2);
+            //     if (jep.dst_prc == Precision::FP16) {
+            //         vcvtps2ph(ptr[reg_dst + vlen_], vmm_dst, 0x4);
+            //     } else if (jep.dst_prc == Precision::BF16) {
+            //         Xmm xmm_dst = Xmm(vmm_dst.getIdx());
+            //         uni_vcvtneps2bf16->emit_code({static_cast<size_t>(vmm_dst.getIdx())},
+            //                                      {static_cast<size_t>(xmm_dst.getIdx())});
+            //         uni_vmovdqu(ptr[reg_dst + vlen_], xmm_dst);
+            //     } else {
+            //         OPENVINO_THROW("wrong oupt precision");
             //     }
 
             //     for (size_t i = 0; i < jep.inputs_number; i++)
             //         if (jep.src_size[i] != 1)
-            //             add(get_src_reg(i), jep.src_prc[i].size() * loop_step);
+            //             add(get_src_reg(i), 2 * vlen_);
 
-            //     add(reg_dst, jep.dst_prc.size() * loop_step);
+            //     add(reg_dst, 2 * vlen_);
             //     sub(reg_work_amount, loop_step);
 
             //     jmp(main_loop_label, T_NEAR);
             // }
-
-            /********************************interleave instructions usage*****************************/
-            L(main_loop_label);
-            {
-                // double step length for odd + even each time
-                size_t loop_step = cpu_isa_traits<isa>::vlen / exec_prc.size() * 2;
-                size_t vlen_ = cpu_isa_traits<isa>::vlen / 2;
-
-                cmp(reg_work_amount, loop_step);
-                jl(main_loop_end_label, T_NEAR);
-
-                // load_vector
-                Vmm vmm_even_1 = get_vmm_reg(0);
-                Vmm vmm_odd_1 = get_vmm_reg(1);
-                Vmm vmm_tmp_1 = get_aux_vmm(0);
-
-                Ymm ymm_even_1 = Ymm(vmm_even_1.getIdx());
-                Ymm ymm_odd_1 = Ymm(vmm_odd_1.getIdx());
-                Ymm ymm_aux0_1 = Ymm(vmm_tmp_1.getIdx());
-                Ymm ymm_aux1_1 = Ymm(vmm_odd_1.getIdx());
-
-                Vmm vmm_even_2 = get_vmm_reg(3);
-                Vmm vmm_odd_2 = get_vmm_reg(4);
-                Vmm vmm_tmp_2 = get_aux_vmm(1);
-
-                Ymm ymm_even_2 = Ymm(vmm_even_2.getIdx());
-                Ymm ymm_odd_2 = Ymm(vmm_odd_2.getIdx());
-                Ymm ymm_aux0_2 = Ymm(vmm_tmp_2.getIdx());
-                Ymm ymm_aux1_2 = Ymm(vmm_odd_2.getIdx());
-
-                if (jep.src_prc[0] == Precision::FP16) {
-                    vcvtneeph2ps(vmm_even_1, ptr[get_src_reg(0)]);
-                    vcvtneoph2ps(vmm_odd_1, ptr[get_src_reg(0)]);
-                    vcvtneeph2ps(vmm_even_2, ptr[get_src_reg(1)]);
-                    vcvtneoph2ps(vmm_odd_2, ptr[get_src_reg(1)]);
-                } else if (jep.src_prc[0] == Precision::BF16) {
-                    vcvtneebf162ps(vmm_even_1, ptr[get_src_reg(0)]);
-                    vcvtneobf162ps(vmm_odd_1, ptr[get_src_reg(0)]);
-                    vcvtneebf162ps(vmm_even_2, ptr[get_src_reg(1)]);
-                    vcvtneobf162ps(vmm_odd_2, ptr[get_src_reg(1)]);
-                } else {
-                    OPENVINO_THROW("wrong input precision");
-                }
-
-                vpunpckldq(ymm_aux0_1, ymm_even_1, ymm_odd_1);
-                vpunpckhdq(ymm_aux1_1, ymm_even_1, ymm_odd_1);
-                vperm2i128(ymm_even_1, ymm_aux0_1, ymm_aux1_1, 0x20);
-                vperm2i128(ymm_odd_1, ymm_aux0_1, ymm_aux1_1, 0x31);
-
-                vpunpckldq(ymm_aux0_2, ymm_even_2, ymm_odd_2);
-                vpunpckhdq(ymm_aux1_2, ymm_even_2, ymm_odd_2);
-                vperm2i128(ymm_even_2, ymm_aux0_2, ymm_aux1_2, 0x20);
-                vperm2i128(ymm_odd_2, ymm_aux0_2, ymm_aux1_2, 0x31);
-
-                // compute and store
-                std::vector<size_t> in_idxs;
-                std::vector<size_t> aux_idxs;
-                std::vector<size_t> out_idxs;
-
-                in_idxs.push_back(vmm_even_1.getIdx());
-                in_idxs.push_back(vmm_even_2.getIdx());
-                out_idxs.push_back(vmm_dst.getIdx());
-                eltwise_emitter->emit_code(in_idxs, out_idxs, aux_idxs);
-                if (jep.dst_prc == Precision::FP16) {
-                    vcvtps2ph(ptr[reg_dst], vmm_dst, 0x4);
-                } else if (jep.dst_prc == Precision::BF16) {
-                    Xmm xmm_dst = Xmm(vmm_dst.getIdx());
-                    uni_vcvtneps2bf16->emit_code({static_cast<size_t>(vmm_dst.getIdx())},
-                                                 {static_cast<size_t>(xmm_dst.getIdx())});
-                    uni_vmovdqu(ptr[reg_dst], xmm_dst);
-                } else {
-                    OPENVINO_THROW("wrong oupt precision");
-                }
-
-                std::vector<size_t> in_idxs2;
-                std::vector<size_t> aux_idxs2;
-                std::vector<size_t> out_idxs2;
-                in_idxs2.push_back(vmm_odd_1.getIdx());
-                in_idxs2.push_back(vmm_odd_2.getIdx());
-                out_idxs2.push_back(vmm_dst.getIdx());
-                eltwise_emitter->emit_code(in_idxs2, out_idxs2, aux_idxs2);
-                if (jep.dst_prc == Precision::FP16) {
-                    vcvtps2ph(ptr[reg_dst + vlen_], vmm_dst, 0x4);
-                } else if (jep.dst_prc == Precision::BF16) {
-                    Xmm xmm_dst = Xmm(vmm_dst.getIdx());
-                    uni_vcvtneps2bf16->emit_code({static_cast<size_t>(vmm_dst.getIdx())},
-                                                 {static_cast<size_t>(xmm_dst.getIdx())});
-                    uni_vmovdqu(ptr[reg_dst + vlen_], xmm_dst);
-                } else {
-                    OPENVINO_THROW("wrong oupt precision");
-                }
-
-                for (size_t i = 0; i < jep.inputs_number; i++)
-                    if (jep.src_size[i] != 1)
-                        add(get_src_reg(i), 2 * vlen_);
-
-                add(reg_dst, 2 * vlen_);
-                sub(reg_work_amount, loop_step);
-
-                jmp(main_loop_label, T_NEAR);
-            }
 
             L(main_loop_end_label);
         }
@@ -2626,6 +2631,16 @@ void Eltwise::prepareParams() {
                 IE_THROW(Unexpected) << "Eltwise node with name '" << getName() << "' has unexpected fused op of type '" << node->getTypeStr() << "'";
             }
         }
+        // my test, get cache size
+        // auto cacheSizeL1 = dnnl::utils::get_cache_size(1, true);
+        // auto cacheSizeL2 = dnnl::utils::get_cache_size(2, true);
+        // auto cacheSizeL3 = dnnl::utils::get_cache_size(3, true);
+
+        // auto cacheSizeL1 = dnnl::utils::get_cache_size(1, false);
+        // auto cacheSizeL2 = dnnl::utils::get_cache_size(2, false);
+        // auto cacheSizeL3 = dnnl::utils::get_cache_size(3, false);
+        // std::cout << "my test Cache Size: L1: " << cacheSizeL1 << " L2: " << cacheSizeL2 << " L3: " << cacheSizeL3
+        //           << std::endl;
 
         auto cache = context->getParamsCache();
         auto result = cache->getOrCreate(key, buildExecutor);

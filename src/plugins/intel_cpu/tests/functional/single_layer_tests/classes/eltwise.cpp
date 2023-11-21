@@ -143,6 +143,10 @@ void EltwiseLayerCPUTest::SetUp() {
     configuration.insert(additionalConfig.begin(), additionalConfig.end());
     updateSelectedType(getPrimitiveType(), netType, configuration);
     // selectedType = makeSelectedTypeStr(getPrimitiveType(), netType);
+
+    // my test enforce threads number = 1
+    // configuration.insert({"INFERENCE_NUM_THREADS", 1});
+
 #if defined(OPENVINO_ARCH_ARM) || defined(OPENVINO_ARCH_ARM64)
     if (eltwiseType == POWER) {
         selectedType = std::regex_replace(selectedType, std::regex("acl"), "ref");
@@ -222,7 +226,7 @@ TEST_P(EltwiseLayerCPUTest, CompareWithRefs) {
 namespace Eltwise {
 const std::vector<ov::AnyMap>& additional_config() {
     static const std::vector<ov::AnyMap> additionalConfig = {
-        // {{ov::hint::inference_precision.name(), ov::element::f32}},
+        {{ov::hint::inference_precision.name(), ov::element::f32}},
         {{ov::hint::inference_precision.name(), ov::element::f16}},
         {{ov::hint::inference_precision.name(), ov::element::bf16}}
     };
