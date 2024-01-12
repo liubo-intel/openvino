@@ -135,6 +135,9 @@ void LSTMCellTest::SetUp() {
         ov::pass::Manager m;
         m.register_pass<ov::pass::LSTMCellDecomposition>();
         m.run_passes(function);
+        // m.register_pass<ov::pass::Serialize>("/home/liubo/others/My_models/lstm_f16_inf_model/f32/lstm_f32_inf_ir.xml",
+        //                                      "/home/liubo/others/My_models/lstm_f16_inf_model/f32/lstm_f32_inf_ir.bin");
+        // m.run_passes(function);
     }
 }
 }  // namespace test

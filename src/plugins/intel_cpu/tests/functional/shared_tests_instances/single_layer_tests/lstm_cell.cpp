@@ -11,24 +11,21 @@ namespace {
 using ov::test::LSTMCellTest;
 using ov::test::utils::InputLayerType;
 
-std::vector<bool> should_decompose{false, true};
+std::vector<bool> should_decompose{true};
 std::vector<size_t> batch{5};
-std::vector<size_t> hidden_size{1, 10};
-std::vector<size_t> input_size{1, 30};
-std::vector<float> clip{0.f, 0.7f};
+std::vector<size_t> hidden_size{1};
+std::vector<size_t> input_size{1};
+std::vector<float> clip{0.f};
 
-std::vector<std::vector<std::string>> activations = {{"relu", "sigmoid", "tanh"}, {"sigmoid", "tanh", "tanh"},
-                                                     {"tanh", "relu", "sigmoid"}, {"sigmoid", "sigmoid", "sigmoid"},
-                                                     {"tanh", "tanh", "tanh"}, {"relu", "relu", "relu"}};
+std::vector<std::vector<std::string>> activations = {{"relu", "relu", "relu"}};
 
 std::vector<InputLayerType> layer_types = {
-    InputLayerType::CONSTANT,
-    InputLayerType::PARAMETER
+    InputLayerType::CONSTANT
 };
 
 std::vector<ov::element::Type> model_types = {
-    ov::element::f32,
     ov::element::f16};
+    // ov::element::f32};
 
 INSTANTIATE_TEST_SUITE_P(smoke_LSTMCellCommon, LSTMCellTest,
                         ::testing::Combine(

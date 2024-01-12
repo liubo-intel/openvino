@@ -67,6 +67,7 @@ void LayerTestsCommon::Run() {
         functionRefs->set_friendly_name("refFunction");
     }
 
+    // this->Serialize();
     // in case of crash jump will be made and work will be continued
     auto crashHandler = std::unique_ptr<ov::test::utils::CrashHandler>(new ov::test::utils::CrashHandler());
 
@@ -111,6 +112,8 @@ void LayerTestsCommon::Serialize(ngraph::pass::Serialize::Version ir_version) {
 
     std::string out_xml_path = output_name + ".xml";
     std::string out_bin_path = output_name + ".bin";
+    // std::string out_xml_path = "/home/liubo/others/My_models/lstm_f16_inf/my_lstm_f16_inf_ir.xml";
+    // std::string out_bin_path = "/home/liubo/others/My_models/lstm_f16_inf/my_lstm_f16_inf_ir.bin";
 
     ngraph::pass::Manager manager;
     manager.register_pass<ov::pass::Serialize>(out_xml_path, out_bin_path, ir_version);
