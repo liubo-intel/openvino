@@ -19,6 +19,7 @@ bool Convert::isSupportedOperation(const std::shared_ptr<const ov::Node>& op, st
     try {
         const auto convert = std::dynamic_pointer_cast<const ov::opset1::Convert>(op);
         if (!convert) {
+        // if (!convert || convert->get_destination_type() == element::f16) {
             errorMessage = "Only opset1 Convert operation is supported";
             return false;
         }
