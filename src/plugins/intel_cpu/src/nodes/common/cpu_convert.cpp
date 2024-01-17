@@ -386,7 +386,8 @@ struct ConvertPrecision<std::tuple<src_t, ov::float16>> {
                 const size_t offset = i * batch;
                 const size_t current_batch_size = std::min(ctx.size - offset, batch);
                 for (size_t j = 0; j < current_batch_size; ++j)         // src_t -> fp32
-                    tmp[j] = static_cast<float>(std::max(std::min(src[offset + j], ubound), lbound));
+                    // tmp[j] = static_cast<float>(std::max(std::min(src[offset + j], ubound), lbound));
+                    tmp[j] = static_cast<float>(src[offset + j]);
                 jit_convert(tmp, dst + offset, current_batch_size);     // fp32 -> fp16
             });
         } else {
@@ -395,7 +396,8 @@ struct ConvertPrecision<std::tuple<src_t, ov::float16>> {
                 const size_t offset = i * batch;
                 const size_t current_batch_size = std::min(ctx.size - offset, batch);
                 for (size_t j = 0; j < current_batch_size; ++j)         // src_t -> fp32
-                    tmp[j] = static_cast<float>(std::trunc(std::max(std::min(src[offset + j], ubound), lbound)));
+                    // tmp[j] = static_cast<float>(std::trunc(std::max(std::min(src[offset + j], ubound), lbound)));
+                    tmp[j] = static_cast<float>(src[offset + j]);
                 jit_convert(tmp, dst + offset, current_batch_size);     // fp32 -> fp16
             });
         }
