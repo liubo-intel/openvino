@@ -35,6 +35,7 @@
 #include "memory_desc/dnnl_blocked_memory_desc.h"
 #include <common/primitive_desc.hpp>
 #include <common/primitive_desc_iface.hpp>
+#include "utils/profiler.hpp"
 
 using namespace dnnl;
 using namespace openvino;
@@ -551,6 +552,7 @@ void Node::updateShapes() {
                     getName());
         try {
             if (needShapeInfer()) {
+                PROFILE(_prof, "updateShape", getName());
                 auto result = shapeInfer();
                 if (ShapeInferStatus::success == result.status) {
                     redefineOutputMemory(result.dims);
@@ -568,6 +570,7 @@ void Node::updateDynamicParams() {
                     " with name: ",
                     getName());
     try {
+        PROFILE(_prof, "updateDynamicParams", getName());
         if (isExecutable()) {
             if (needPrepareParams()) {
                 OPENVINO_ASSERT(inputShapesDefined(),
