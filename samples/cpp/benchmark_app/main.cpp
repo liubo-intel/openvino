@@ -36,7 +36,26 @@
 #include "utils.hpp"
 // clang-format on
 
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <sys/stat.h>
+
+
 namespace {
+// 函数用于检查文件是否存在
+bool fileExists(const std::string& path) {
+    struct stat buffer;
+    return (stat(path.c_str(), &buffer) == 0);
+}
+
+// 函数用于获取文件大小
+long getFileSize(const std::string& filename) {
+    struct stat stat_buf;
+    int rc = stat(filename.c_str(), &stat_buf);
+    return rc == 0 ? stat_buf.st_size : -1;
+}
+
 bool parse_and_check_command_line(int argc, char* argv[]) {
     // ---------------------------Parsing and validating input
     // arguments--------------------------------------
@@ -597,6 +616,32 @@ int main(int argc, char* argv[]) {
 
             auto startTime = Time::now();
             auto model = core.read_model(FLAGS_m);
+            // my test
+            // 假设你已经知道XML文件的路径
+            std::string xmlFilePath = FLAGS_m;
+
+            // 检查文件是否存在
+            if (!fileExists(xmlFilePath)) {
+                std::cerr << "File does not exist: " << xmlFilePath << std::endl;
+                return 1;
+            }
+
+            // 获取不带扩展名的文件路径，以便替换扩展名
+            std::string basePath = xmlFilePath.substr(0, xmlFilePath.find_last_of('.'));
+
+            // 创建.bin文件的路径
+            std::string binPath = basePath + ".bin";
+
+            // 检查.bin文件是否存在
+            if (!fileExists(binPath)) {
+                std::cerr << "BIN file does not exist: " << binPath << std::endl;
+                return 1;
+            }
+
+            // 获取.bin文件的大小
+            long fileSize = getFileSize(binPath);
+            std::cout << "my test: The size of '" << binPath << "' is " << fileSize/(1024*1024) << " Mbytes." << std::endl;
+
             auto duration_ms = get_duration_ms_till_now(startTime);
             slog::info << "Read model took " << double_to_string(duration_ms) << " ms" << slog::endl;
             slog::info << "Original model I/O parameters:" << slog::endl;
