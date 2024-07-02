@@ -34,6 +34,7 @@
 #    include "openvino/proxy/plugin.hpp"
 #    include "openvino/proxy/properties.hpp"
 #endif
+#include "openvino/op/constant.hpp"
 
 ov::ICore::~ICore() = default;
 
@@ -722,6 +723,8 @@ ov::SoPtr<ov::ICompiledModel> ov::CoreImpl::compile_model(const std::shared_ptr<
     OV_ITT_SCOPE(FIRST_INFERENCE, ov::itt::domains::LoadTime, "Core::compile_model::model");
     std::string deviceName = device_name;
     ov::AnyMap config_with_batch = config;
+    config_with_batch["weights_size"] = coreConfig.get_weight_size();
+
     // if auto-batching is applicable, the below function will patch the device name and config accordingly:
     auto model = apply_auto_batching(model_, deviceName, config_with_batch);
 
@@ -1525,6 +1528,15 @@ bool ov::CoreImpl::CoreConfig::get_enable_mmap() const {
     return _flag_enable_mmap;
 }
 
+int ov::CoreImpl::CoreConfig::get_weight_size() const {
+    return _weight_size;
+}
+
+void ov::CoreImpl::CoreConfig::set_weight_size(const int& size) {
+    std::lock_guard<std::mutex> lock(_cacheConfigMutex);
+    _weight_size = size;
+}
+
 // Creating thread-safe copy of config including shared_ptr to ICacheManager
 // Passing empty or not-existing name will return global cache config
 ov::CoreImpl::CoreConfig::CacheConfig ov::CoreImpl::CoreConfig::get_cache_config_for_device(
@@ -1582,7 +1594,24 @@ void ov::CoreImpl::add_mutex(const std::string& dev_name) {
 
 std::shared_ptr<ov::Model> ov::CoreImpl::read_model(const std::string& modelPath, const std::string& binPath) const {
     OV_ITT_SCOPE(FIRST_INFERENCE, ov::itt::domains::ReadTime, "CoreImpl::read_model from file");
-    return ov::util::read_model(modelPath, binPath, extensions, coreConfig.get_enable_mmap());
+    // return ov::util::read_model(modelPath, binPath, extensions, coreConfig.get_enable_mmap());
+    auto ov_model = ov::util::read_model(modelPath, binPath, extensions, coreConfig.get_enable_mmap());
+    // cal weight size
+    float total_weight_size = 0;
+    for (auto& op : ov_model->get_ordered_ops()) {
+        if (auto constop = std::dynamic_pointer_cast<op::v0::Constant>(op)) {
+            auto weight = static_cast<float>(constop->get_byte_size()) / (1024 * 1024);
+            total_weight_size += weight;
+            // std::cout << "my test weight: " << weight << std::endl;
+        }
+    }
+    //my test fix number
+    // total_weight_size = 5;
+
+    const_cast<ov::CoreImpl::CoreConfig&>(coreConfig).set_weight_size(static_cast<int>(total_weight_size));
+    // std::cout << "my test Total weight: " << total_weight_size << std::endl;
+
+    return ov_model;
 }
 
 std::shared_ptr<ov::Model> ov::CoreImpl::read_model(const std::string& model,

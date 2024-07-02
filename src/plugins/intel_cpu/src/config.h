@@ -100,6 +100,7 @@ struct Config {
 
     int modelPreferThreads = -1;
     ModelType modelType = ModelType::Unknown;
+    int weightSize = 0;
 
 #ifdef CPU_DEBUG_CAPS
     DebugCapsConfig debugCaps;

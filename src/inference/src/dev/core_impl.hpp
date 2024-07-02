@@ -83,6 +83,9 @@ private:
 
         bool get_enable_mmap() const;
 
+        int get_weight_size() const;
+        void set_weight_size(const int& size);
+
         // Creating thread-safe copy of config including shared_ptr to ICacheManager
         // Passing empty or not-existing name will return global cache config
         CacheConfig get_cache_config_for_device(const ov::Plugin& plugin, ov::AnyMap& parsedConfig) const;
@@ -92,6 +95,7 @@ private:
         CacheConfig _cacheConfig;
         std::map<std::string, CacheConfig> _cacheConfigPerDevice;
         bool _flag_enable_mmap = true;
+        int _weight_size = 0;
     };
 
     struct CacheContent {

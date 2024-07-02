@@ -639,8 +639,8 @@ int main(int argc, char* argv[]) {
             }
 
             // 获取.bin文件的大小
-            long fileSize = getFileSize(binPath);
-            std::cout << "my test: The size of '" << binPath << "' is " << fileSize/(1024*1024) << " Mbytes." << std::endl;
+            int fileSize = static_cast<int>(getFileSize(binPath)/(1024*1024));
+            std::cout << "my test: The size of '" << binPath << "' is " << fileSize << " Mbytes." << std::endl;
 
             auto duration_ms = get_duration_ms_till_now(startTime);
             slog::info << "Read model took " << double_to_string(duration_ms) << " ms" << slog::endl;
@@ -788,6 +788,8 @@ int main(int argc, char* argv[]) {
             // --------------------------------------------------------
             next_step();
             startTime = Time::now();
+            // my test
+            // device_config["weights_size"] = fileSize;
             compiledModel = core.compile_model(model, device_name, device_config);
             duration_ms = get_duration_ms_till_now(startTime);
             slog::info << "Compile model took " << double_to_string(duration_ms) << " ms" << slog::endl;

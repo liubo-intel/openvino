@@ -235,7 +235,12 @@ std::vector<std::vector<int>> get_streams_info_table(const int input_streams,
         } else if (hint_model_distribution_policy.size() == 0) {
             for (auto& row : proc_socket_table) {
                 if (row[PROC_SOCKET_ID] == current_socket_id) {
-                    n_threads_per_stream = std::max(n_threads_per_stream, row[ALL_PROC]);
+                    // n_threads_per_stream = std::max(n_threads_per_stream, row[ALL_PROC]);
+                    // my test: add update here?
+                    n_threads_per_stream =
+                        model_prefer_threads > 0
+                            ? std::min(std::max(n_threads_per_stream, row[ALL_PROC]), model_prefer_threads)
+                            : std::max(n_threads_per_stream, row[ALL_PROC]);
                 }
             }
         } else {
@@ -468,6 +473,7 @@ int get_model_prefer_threads(const int num_streams,
                              Config& config) {
     const int sockets = get_num_sockets();
     auto model_prefer = 0;
+    bool isNewXeon = false;
     if (-1 == config.modelPreferThreads) {
         const auto isa = dnnl::get_effective_cpu_isa();
         float isaSpecificThreshold = 1.0f;
@@ -484,7 +490,9 @@ int get_model_prefer_threads(const int num_streams,
             isaSpecificThreshold = 2.0f;
             break;
         case dnnl::cpu_isa::avx512_core_amx:
+        case dnnl::cpu_isa::avx512_core_amx_fp16:
             isaSpecificThreshold = 4.0f;
+            isNewXeon = true;
             break;
         default:
             isaSpecificThreshold = 1.0f;
@@ -552,6 +560,7 @@ int get_model_prefer_threads(const int num_streams,
 
     // latency
     if (num_streams <= sockets && num_streams > 0) {
+        bool llm_related = has_matmul_with_compressed_weights(model);
         if (proc_type_table[0][EFFICIENT_CORE_PROC] > 0 && proc_type_table[0][MAIN_CORE_PROC] > 0) {
 #ifdef __APPLE__
             if ((proc_type_table.size() == 1) && (proc_type_table[0][EFFICIENT_CORE_PROC] > 0)) {
@@ -560,7 +569,6 @@ int get_model_prefer_threads(const int num_streams,
                                    : proc_type_table[0][ALL_PROC];
             }
 #else
-            bool llm_related = has_matmul_with_compressed_weights(model);
             bool int8_intensive = ov::op::util::has_op_with_type<ov::op::v0::FakeQuantize>(model) || llm_related;
             const int int8_threshold = 4;  // ~relative efficiency of the VNNI-intensive code for Big vs Little cores;
             const int fp32_threshold = 2;  // ~relative efficiency of the AVX2 fp32 code for Big vs Little cores;
@@ -574,6 +582,17 @@ int get_model_prefer_threads(const int num_streams,
                                       : proc_type_table[0][MAIN_CORE_PROC])
                                : proc_type_table[0][MAIN_CORE_PROC] + proc_type_table[0][EFFICIENT_CORE_PROC];
 #endif
+        } else if (isNewXeon && !llm_related && proc_type_table.size() > 1) {
+            // // my test
+            // model_prefer = 32;
+            // TODO: config.weightSize threshold need tobe updated
+            if (config.weightSize <= 100) {
+                model_prefer = (proc_type_table[1][MAIN_CORE_PROC] > 32) ? 32 : proc_type_table[1][MAIN_CORE_PROC];
+            } else if ((proc_type_table.size() > 3) &&
+                       (proc_type_table[1][PROC_SOCKET_ID] == proc_type_table[2][PROC_SOCKET_ID]) &&
+                       (proc_type_table[1][MAIN_CORE_PROC] + proc_type_table[2][MAIN_CORE_PROC] >= 64)) {
+                model_prefer = proc_type_table[1][MAIN_CORE_PROC] + proc_type_table[2][MAIN_CORE_PROC];
+            }
         }
     } else {  // throughput
         model_prefer = config.modelPreferThreads;
