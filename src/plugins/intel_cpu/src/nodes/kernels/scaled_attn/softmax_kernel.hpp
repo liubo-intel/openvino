@@ -192,7 +192,8 @@ inline void scale_add2_reduce_max(float* a,
                                   float alibi_slope,
                                   float& max) {
     size_t i = 0;
-#if defined(HAVE_AVX512F)
+// #if defined(HAVE_AVX512F)
+#if (0)
     auto v_max0 = _mm512_set1_ps(std::numeric_limits<float>::lowest());
     auto v_max1 = v_max0;
     auto v_max2 = v_max0;
@@ -293,7 +294,8 @@ inline void scale_add2_reduce_max(float* a,
     v_max2 = _mm512_max_ps(v_max2, v_max3);
     v_max0 = _mm512_max_ps(v_max0, v_max2);
     max = _mm512_reduce_max_ps(v_max0);
-#elif defined(HAVE_AVX2)
+// #elif defined(HAVE_AVX2)
+#elif (0)
     auto v_max0 = _mm256_set1_ps(std::numeric_limits<float>::lowest());
     auto v_max1 = v_max0;
     auto v_max2 = v_max0;
@@ -397,7 +399,8 @@ inline void scale_add2_reduce_max(float* a,
     v_max0 = _mm256_max_ps(v_max0, v_max2);
     hmax(v_max0);
     max = _mm256_cvtss_f32(v_max0);
-#elif defined(OPENVINO_ARCH_ARM64)
+// #elif defined(OPENVINO_ARCH_ARM64)
+#elif (0)
     auto v_max = vdupq_n_f32(std::numeric_limits<float>::lowest());
     auto v_scale = vdupq_n_f32(scale);
     auto v_nfltmax = vdupq_n_f32(-FLT_MAX);
@@ -672,7 +675,8 @@ static inline void exp_ps_avx512(__m512& src) {
 
 inline void exp_reduce_sum(float* a, const float max, const size_t size, float& sum) {
     size_t i = 0;
-#if defined(HAVE_AVX512F)
+// #if defined(HAVE_AVX512F)
+#if (0)
     __m512 v_a;
     auto v_max = _mm512_set1_ps(max);
     auto v_sum = _mm512_set1_ps(0.0f);
@@ -696,7 +700,8 @@ inline void exp_reduce_sum(float* a, const float max, const size_t size, float& 
         i += (size - i);
     }
     sum = _mm512_reduce_add_ps(v_sum);
-#elif defined(HAVE_AVX2)
+// #elif defined(HAVE_AVX2)
+#elif (0)
     __m256 v_a;
     auto v_max = _mm256_set1_ps(max);
     auto v_sum = _mm256_set1_ps(0.0f);
@@ -722,7 +727,8 @@ inline void exp_reduce_sum(float* a, const float max, const size_t size, float& 
     }
     hsum(v_sum);
     sum = _mm256_cvtss_f32(v_sum);
-#elif defined(OPENVINO_ARCH_ARM64)
+// #elif defined(OPENVINO_ARCH_ARM64)
+#elif (0)
 #    if defined(HAVE_SVE)
     svfloat32_t v_a;
     svfloat32_t v_max = svdup_n_f32(max);
@@ -891,7 +897,8 @@ inline void exp_reduce_sum(ov::float16* a, const ov::float16 max, const size_t s
 
 inline void multiply_scalar(float* a, float* a_dst, const float val, const size_t size) {
     size_t i = 0;
-#if defined(HAVE_AVX512F)
+// #if defined(HAVE_AVX512F)
+#if (0)
     auto v_scale = _mm512_set1_ps(val);
     __m512 v_a = {0};
     while (i + vec_len_f32_avx512 <= size) {
@@ -908,7 +915,8 @@ inline void multiply_scalar(float* a, float* a_dst, const float val, const size_
 
         i += (size - i);
     }
-#elif defined(HAVE_AVX2)
+// #elif defined(HAVE_AVX2)
+#elif (0)
     auto v_scale = _mm256_set1_ps(val);
     __m256 v_a = {0};
     while (i + vec_len_f32_avx2 <= size) {
@@ -925,7 +933,8 @@ inline void multiply_scalar(float* a, float* a_dst, const float val, const size_
 
         i += (size - i);
     }
-#elif defined(OPENVINO_ARCH_ARM64)
+// #elif defined(OPENVINO_ARCH_ARM64)
+#elif (0)
 #    if defined(HAVE_SVE)
     svfloat32_t v_scale = svdup_n_f32(val);
     size_t inc = vec_len_f32_sve();

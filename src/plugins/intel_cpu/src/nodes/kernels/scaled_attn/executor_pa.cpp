@@ -79,7 +79,8 @@ static void attn_acc_value_block(float* out,
                                  const size_t S,
                                  const size_t block_size,
                                  [[maybe_unused]] const size_t group_size) {
-#    if defined(HAVE_AVX512F)
+// #    if defined(HAVE_AVX512F)
+#    if (0)
     size_t j = 0;
     for (; j + 4 <= block_size; j += 4) {
         auto attn_w_vec0 = _mm512_set1_ps(weight[0]);
@@ -138,7 +139,8 @@ static void attn_acc_value_block(float* out,
         }
     }
     return;
-#    elif defined(HAVE_AVX2)
+// #    elif defined(HAVE_AVX2)
+#    elif (0)
     size_t j = 0;
     for (; j + 4 <= block_size; j += 4) {
         auto attn_w_vec0 = _mm256_set1_ps(weight[0]);
@@ -764,7 +766,8 @@ static void dot_product_block(TA* a,
                               const size_t block_size,
                               [[maybe_unused]] const size_t group_size) {
     auto* b_src = reinterpret_cast<typename element_type_traits<SRC_PREC>::value_type*>(b);
-#    if defined(HAVE_AVX512F)
+// #    if defined(HAVE_AVX512F)
+#    if (0)
     size_t j = 0;
     for (; j + 4 <= block_size; j += 4) {
         auto vsum0 = _mm512_setzero_ps();
@@ -811,7 +814,8 @@ static void dot_product_block(TA* a,
         *c++ = sum;
     }
     return;
-#    elif defined(HAVE_AVX2)
+// #    elif defined(HAVE_AVX2)
+#    elif (0)
     size_t j = 0;
     for (; j + 4 <= block_size; j += 4) {
         auto vsum0 = _mm256_set1_ps(0.0f);
@@ -1710,7 +1714,8 @@ static void dot_product_block_quantized(TA* a,
 template <typename T>
 static void attn_reduce(T* dst, float* temp, size_t M, size_t S, size_t temp_stride) {
     size_t i = 0;
-#    if defined(HAVE_AVX512F)
+// #    if defined(HAVE_AVX512F)
+#    if (0)
     for (; i + vec_len_f32_avx512 <= S; i += vec_len_f32_avx512) {
         auto* src = temp + i;
         auto result_vec_fp32 = _mm512_setzero_ps();
@@ -1722,7 +1727,8 @@ static void attn_reduce(T* dst, float* temp, size_t M, size_t S, size_t temp_str
         // save to bf16
         mm512_uni_storeu_ps(dst + i, result_vec_fp32);
     }
-#    elif defined(HAVE_AVX2)
+// #    elif defined(HAVE_AVX2)
+#    elif (0)
     for (; i + vec_len_f32_avx2 <= S; i += vec_len_f32_avx2) {
         auto* src = temp + i;
         auto result_vec_fp32 = _mm256_set1_ps(0.0f);
@@ -2892,14 +2898,59 @@ struct MHAHelper {
                        const PlainTensor& output_score,
                        size_t max_context_len,
                        const PlainTensor& past_lens,
-                       [[maybe_unused]] const PlainTensor& subsequence_begins,
+                       //    [[maybe_unused]] const PlainTensor& subsequence_begins,
+                       const PlainTensor& subsequence_begins,
                        const PlainTensor& block_indices,
                        const PlainTensor& block_indices_begins,
                        const PlainTensor& alibi_slopes,
-                       const PlainTensor& score_aggregation_window) {
+                       const PlainTensor& score_aggregation_window,
+                       const PlainTensor& sparse_attention_mask) {
         auto B = past_lens.size(0);
-        auto q_len = query.size(2);
+        // auto q_len = query.size(2);
+        // 正确的做法：找到最大的 q_len
+        size_t max_q_len = 0;
+        for (size_t b = 0; b < B; b++) {
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            max_q_len = std::max(max_q_len, static_cast<size_t>(q_len_for_batch));
+        }
+        auto q_len = max_q_len;  // 使用最大的 q_len
         auto kv_len_in_blocks = div_up(max_context_len, _block_size);
+
+        // 添加函数入口调试信息
+        // if (B == 1) {
+        //     printf("DEBUG exec_loop_bhl ENTRY: B=%zu, q_len=%zu, max_context_len=%zu, kv_len_in_blocks=%zu\n",
+        //            B, q_len, max_context_len, kv_len_in_blocks);
+        // }
+
+        // 重组查询张量：从 {B_token, H, 1, S} 转换为 {B, H, L, S}
+        // 创建一个重组后的查询张量缓冲区
+        PlainTensor query_reshaped;
+        query_reshaped.resize<DATA_TYPE>({B, H, q_len, S});
+
+        // 将输入的query按batch重新组织
+        for (size_t b = 0; b < B; b++) {
+            auto token_start = subsequence_begins.ptr<int32_t>()[b];
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+
+            for (size_t pq = 0; pq < static_cast<size_t>(q_len_for_batch); pq++) {
+                auto global_token_idx = token_start + pq;
+                for (size_t h = 0; h < H; h++) {
+                    // 从输入的 query {B_token, H, 1, S} 复制到重组的 {B, H, L, S}
+                    auto* src = query.ptr<DATA_TYPE>(global_token_idx, h, 0);
+                    auto* dst = query_reshaped.ptr<DATA_TYPE>(b, h, pq);
+                    std::memcpy(dst, src, S * sizeof(DATA_TYPE));
+                }
+            }
+
+            // 对于未使用的位置，填零
+            for (size_t pq = static_cast<size_t>(q_len_for_batch); pq < q_len; pq++) {
+                for (size_t h = 0; h < H; h++) {
+                    auto* dst = query_reshaped.ptr<DATA_TYPE>(b, h, pq);
+                    std::memset(dst, 0, S * sizeof(DATA_TYPE));
+                }
+            }
+        }
+
         // aligned to cache line (64bytes=16*sizeof(float)) to avoid false sharing
         _weight_bhl.resize<float>({B, H, q_len, rnd_up(max_context_len, std::max(_block_size, size_t{16}))});
 
@@ -2933,7 +2984,19 @@ struct MHAHelper {
                 }
             };
         auto loop_qk = [&](size_t b, size_t pk_in_blocks, size_t hx) {
-            auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+            // auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+            // 修复：支持多token的context_len计算
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + q_len_for_batch;
+            // 调试输出
+            // if (b == 0 && pk_in_blocks == 0 && hx == 0) {
+            //     printf("DEBUG: b=%zu, q_len_for_batch=%d, past_lens=%d, context_len=%zu\n",
+            //            b,
+            //            (int)q_len_for_batch,
+            //            past_lens.ptr<int32_t>()[b],
+            //            context_len);
+            // }
+
             size_t hk = 0;
             size_t hq_beg = 0;
             size_t hq_end = 0;
@@ -2943,13 +3006,14 @@ struct MHAHelper {
             auto pk = pk_in_blocks * _block_size;
             if (pk < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pk_in_blocks];
-#    if defined(OPENVINO_ARCH_X86_64)
+// #    if defined(OPENVINO_ARCH_X86_64)
+#    if (0)
                 if (one_of(_fastpath_valid_prec, ov::element::bf16, ov::element::f16)) {
                     _gemv->tile_config();
                     for (size_t pq = 0; pq < q_len; pq++) {
                         for (size_t h = hq_beg; h < hq_end; h++) {
                             (*_gemv)(
-                                query.ptr<DATA_TYPE>(b, h, pq),
+                                query_reshaped.ptr<DATA_TYPE>(b, h, pq),
                                 key_cache.ptr<typename ov::element_type_traits<KEY_PREC>::value_type>(block_number, hk),
                                 _weight_bhl.ptr<float>(b, h, pq) + pk);
                         }
@@ -2958,10 +3022,16 @@ struct MHAHelper {
                 } else {
 #    endif
                     for (size_t pq = 0; pq < q_len; pq++) {
+                        size_t q_blk = pq / _block_size;
                         for (size_t h = hq_beg; h < hq_end; h++) {
+                            size_t k_blk = pk / _block_size;
+                            // 只处理 mask 为 true 的 block
+                            if (!sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0]) {
+                                continue;
+                            }
                             if constexpr (one_of(KEY_PREC, ov::element::u8, ov::element::u4)) {
                                 dot_product_block_quantized<DATA_TYPE, KEY_PREC>(
-                                    query.ptr<DATA_TYPE>(b, h, pq),
+                                    query_reshaped.ptr<DATA_TYPE>(b, h, pq),
                                     key_cache.ptr<uint8_t, KEY_PREC>(block_number, hk),
                                     _weight_bhl.ptr<float>(b, h, pq) + pk,
                                     S,
@@ -2970,7 +3040,7 @@ struct MHAHelper {
                                     _key_group_size);
                             } else {
                                 dot_product_block<DATA_TYPE, KEY_PREC>(
-                                    query.ptr<DATA_TYPE>(b, h, pq),
+                                    query_reshaped.ptr<DATA_TYPE>(b, h, pq),
                                     key_cache.ptr<typename ov::element_type_traits<KEY_PREC>::value_type>(block_number,
                                                                                                           hk),
                                     _weight_bhl.ptr<float>(b, h, pq) + pk,
@@ -2980,21 +3050,61 @@ struct MHAHelper {
                             }
                         }
                     }
-#    if defined(OPENVINO_ARCH_X86_64)
+// #    if defined(OPENVINO_ARCH_X86_64)
+#    if (0)
                 }
 #    endif
             }
         };
 
+        // 在 loop_softmax 函数中添加调试信息
+
         auto loop_softmax = [&](size_t b, size_t h, size_t pq) {
-            auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
-            auto ncausal = cur_kv_len;
+            // 修复：支持多token的kv_len计算
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            auto past_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]);
+            auto total_kv_len = past_kv_len + q_len_for_batch;
+
+            // 对于 prefill，每个 query position 的 causal length 不同
+            auto ncausal = past_kv_len + pq + 1;
+
+            // 调试输出
+            // if (b == 0 && h == 0 && pq < 3) {
+            //     printf("DEBUG softmax: b=%zu, h=%zu, pq=%zu, q_len_for_batch=%d, past_kv_len=%zu, total_kv_len=%zu, "
+            //            "ncausal=%zu\n",
+            //            b,
+            //            h,
+            //            pq,
+            //            (int)q_len_for_batch,
+            //            past_kv_len,
+            //            total_kv_len,
+            //            ncausal);
+            //     printf("DEBUG softmax: _weight_bhl buffer size: [%zu, %zu, %zu, %zu]\n",
+            //            _weight_bhl.size(0),
+            //            _weight_bhl.size(1),
+            //            _weight_bhl.size(2),
+            //            _weight_bhl.size(3));
+            //     printf("DEBUG softmax: buffer allocated size for this position: %zu\n", _weight_bhl.size(3));
+            // }
+
             // apply attention mask & sofmax
             float* alibi_lookup = nullptr;
             float alibi_slope = 0.F;
             if (alibi_slopes) {
                 alibi_slope = alibi_slopes.ptr<float>()[h];
-                alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - cur_kv_len;
+                alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - ncausal;
+            }
+
+            // 修复：使用缓冲区的实际分配大小，而不是逻辑上的kv长度
+            auto buffer_size = _weight_bhl.size(3);  // 这是实际分配的缓冲区大小
+
+            // 方案1：softmax前将mask==false的位置赋值为-inf
+            size_t q_blk = pq / _block_size;
+            for (size_t k = 0; k < buffer_size; ++k) {
+                size_t k_blk = k / _block_size;
+                if (!sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0]) {
+                    _weight_bhl.ptr<float>(b, h, pq)[k] = -std::numeric_limits<float>::infinity();
+                }
             }
             attn_softmax_kernel<float>(_weight_bhl.ptr<float>(b, h, pq),
                                        _weight_bhl.ptr<float>(b, h, pq),
@@ -3003,11 +3113,15 @@ struct MHAHelper {
                                        nullptr,
                                        nullptr,
                                        false,
-                                       ncausal,
-                                       cur_kv_len,
+                                       ncausal,      // 使用每个位置特定的causal长度
+                                       buffer_size,  // 使用缓冲区实际大小
                                        ov::element::f32,
                                        ov::element::f32,
                                        alibi_slope);
+
+            // if (b == 0 && h == 0 && pq < 3) {
+            //     printf("DEBUG softmax: attn_softmax_kernel completed for b=%zu, h=%zu, pq=%zu\n", b, h, pq);
+            // }
         };
 
         size_t h_dims = loop_hk ? Hk : H;
@@ -3021,7 +3135,11 @@ struct MHAHelper {
 
         if (output_score) {
             parallel_for2d_dynamic(B, q_len, [&](size_t b, size_t pq) {
-                auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+                // auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+                // 修复：支持多token的kv_len计算
+                auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+                auto cur_kv_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + q_len_for_batch;
+
                 const auto score_win_len = score_aggregation_window ? score_aggregation_window.ptr<int32_t>()[b] : 1;
                 auto* dst = output_score.ptr<float>() + _score_infos[b].score_offsets;
                 if (score_win_len) {
@@ -3041,18 +3159,44 @@ struct MHAHelper {
         });
 
         auto loop_wk = [&](size_t b, size_t pv_in_blocks, size_t hx) {
-            auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + 1;
+            // 修复：支持多token的context_len计算
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            auto context_len = static_cast<size_t>(past_lens.ptr<int32_t>()[b]) + q_len_for_batch;
+
             auto pv = pv_in_blocks * _block_size;
             size_t hk = 0;
             size_t hq_beg = 0;
             size_t hq_end = 0;
             get_h_params(loop_hk, hx, _h_each_group_len, hq_beg, hq_end, hk);
 
+            // 调试输出
+            // if (b == 0 && pv_in_blocks == 0 && hx == 0) {
+            //     printf("DEBUG loop_wk: b=%zu, pv_in_blocks=%zu, hx=%zu, q_len_for_batch=%d, context_len=%zu, pv=%zu\n",
+            //            b,
+            //            pv_in_blocks,
+            //            hx,
+            //            (int)q_len_for_batch,
+            //            context_len,
+            //            pv);
+            //     printf("DEBUG loop_wk: _output_bhl buffer size: [%zu, %zu, %zu, %zu, %zu]\n",
+            //            _output_bhl.size(0),
+            //            _output_bhl.size(1),
+            //            _output_bhl.size(2),
+            //            _output_bhl.size(3),
+            //            _output_bhl.size(4));
+            // }
+
             // kv_len must be valid
             if (pv < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pv_in_blocks];
                 for (size_t pq = 0; pq < q_len; pq++) {
+                    size_t q_blk = pq / _block_size;
                     for (size_t h = hq_beg; h < hq_end; h++) {
+                        size_t k_blk = pv / _block_size;
+                        // 只处理 mask==true 的 block
+                        if (!sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0]) {
+                            continue;
+                        }
                         if constexpr (one_of(VALUE_PREC, ov::element::u8, ov::element::u4)) {
                             attn_acc_value_block_quantized<uint8_t, VALUE_PREC>(
                                 _output_bhl.ptr<float>(b, pv_in_blocks, h, pq),
@@ -3077,7 +3221,6 @@ struct MHAHelper {
                 }
             }
         };
-
         if (prefer_static_loop) {
             parallel_for3d(B, kv_len_in_blocks, loop_hk ? Hk : H, loop_wk);
         } else {
@@ -3087,9 +3230,36 @@ struct MHAHelper {
         parallel_for3d(B, H, q_len, [&](size_t b, size_t h, size_t pq) {
             auto* temp = _output_bhl.ptr<float>(b, 0, h, pq);
             size_t temp_stride = _output_bhl.stride(1);  // split with pv_in_blocks steps
-            auto* dst = output_emb.ptr<DATA_TYPE>(b, pq, h * SV);
+
+            // 计算正确的token索引：batch内的相对位置
+            auto token_idx_in_batch = pq;
+            // 计算全局token索引（用于调试和访问output_emb）
+            auto global_token_idx = subsequence_begins.ptr<int32_t>()[b] + pq;
+
+            // 调试输出
+            // if (b == 0 && h == 0 && pq < 3) {
+            //     printf("DEBUG final: b=%zu, h=%zu, pq=%zu, token_idx_in_batch=%zu, global_token_idx=%d\n",
+            //            b, h, pq, token_idx_in_batch, (int)global_token_idx);
+            //     printf("DEBUG final: output_emb size: [%zu, %zu], dims_count=%zu\n",
+            //            output_emb.size(0),
+            //            output_emb.size(1),
+            //            output_emb.m_rank);
+            // }
+
+            // output_emb is [B_token, H * SV], use global_token_idx directly
+            auto* dst = output_emb.ptr<DATA_TYPE>(global_token_idx, h * SV);
+
             attn_reduce(dst, temp, kv_len_in_blocks, SV, temp_stride);
+
+            // if (b == 0 && h == 0 && pq < 3) {
+            //     printf("DEBUG final: attn_reduce completed for b=%zu, h=%zu, pq=%zu\n", b, h, pq);
+            // }
         });
+
+        // 添加函数出口调试信息
+        // if (B == 1) {
+        //     printf("DEBUG exec_loop_bhl EXIT: function completed successfully\n");
+        // }
     }
 };
 
@@ -3489,7 +3659,8 @@ struct MHA {
                     const PlainTensor& block_indices,
                     const PlainTensor& block_indices_begins,
                     const PlainTensor& alibi_slopes,
-                    const PlainTensor& score_aggregation_window) {
+                    const PlainTensor& score_aggregation_window,
+                    const PlainTensor& sparse_attention_mask) {
         _workitems.reset(query, past_lens, subsequence_begins, _helper._block_size);
         if (output_score) {
             _helper.init_score_buffers(past_lens, subsequence_begins, score_aggregation_window);
@@ -3497,33 +3668,62 @@ struct MHA {
 
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
-        if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
-            exec_loop_mixed(query,
-                            present_key,
-                            present_value,
-                            output_emb,
-                            output_score,
-                            max_context_len,
-                            past_lens,
-                            subsequence_begins,
-                            block_indices,
-                            block_indices_begins,
-                            alibi_slopes,
-                            score_aggregation_window);
-        } else {
-            _helper.exec_loop_bhl(query,
-                                  present_key,
-                                  present_value,
-                                  output_emb,
-                                  output_score,
-                                  max_context_len,
-                                  past_lens,
-                                  subsequence_begins,
-                                  block_indices,
-                                  block_indices_begins,
-                                  alibi_slopes,
-                                  score_aggregation_window);
-        }
+        // 强制使用 exec_loop_bhl 处理所有情况
+        _helper.exec_loop_bhl(query,
+                              present_key,
+                              present_value,
+                              output_emb,
+                              output_score,
+                              max_context_len,
+                              past_lens,
+                              subsequence_begins,
+                              block_indices,
+                              block_indices_begins,
+                              alibi_slopes,
+                              score_aggregation_window,
+                              sparse_attention_mask);
+
+        // 原始的条件分支逻辑（已注释）
+        // if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
+        //     exec_loop_mixed(query,
+        //                     present_key,
+        //                     present_value,
+        //                     output_emb,
+        //                     output_score,
+        //                     max_context_len,
+        //                     past_lens,
+        //                     subsequence_begins,
+        //                     block_indices,
+        //                     block_indices_begins,
+        //                     alibi_slopes,
+        //                     score_aggregation_window);
+        // } else {
+        //     _helper.exec_loop_bhl(query,
+        //                           present_key,
+        //                           present_value,
+        //                           output_emb,
+        //                           output_score,
+        //                           max_context_len,
+        //                           past_lens,
+        //                           subsequence_begins,
+        //                           block_indices,
+        //                           block_indices_begins,
+        //                           alibi_slopes,
+        //                           score_aggregation_window);
+        // }
+
+        // _helper.exec_loop_bhl(query,
+        //                       present_key,
+        //                       present_value,
+        //                       output_emb,
+        //                       output_score,
+        //                       max_context_len,
+        //                       past_lens,
+        //                       subsequence_begins,
+        //                       block_indices,
+        //                       block_indices_begins,
+        //                       alibi_slopes,
+        //                       score_aggregation_window);
     }
 };
 
@@ -3532,6 +3732,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
     MHAHelper<DATA_TYPE, KEY_PREC, VALUE_PREC> _helper;
     MHA<DATA_TYPE, KEY_PREC, VALUE_PREC> _kernel;
     PlainTensor _slot_mapping;
+    // PlainTensor _sparse_attention_mask; // [B, H, q_blocks, k_blocks], bool类型
 
     AttentionExecutor() : _kernel(_helper) {}
 
@@ -3565,7 +3766,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
               PlainTensor& rotation_deltas,
               PlainTensor& rotation_trig_lut,
               PlainTensor& output_emb,
-              PlainTensor& output_score) {
+              PlainTensor& output_score,
+              PlainTensor& sparse_attention_mask) {
         q.reset(inputs[ID_Q]);  // [B_token, H * S]
         k.reset(inputs[ID_K]);
         v.reset(inputs[ID_V]);
@@ -3736,10 +3938,50 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             init_rotation_coefficient_scratch = true;
         }
         output_emb.assert_dims({B_token, H * SV});
-        output_emb = output_emb.reshape({B_token, 1, H * SV});
+        // Note: output_emb stays as [B_token, H * SV] for exec_loop_bhl
+        // where tokens are indexed using subsequence_begins to map to global positions
 
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
+
+        // --- 创建和初始化 sparse_attention_mask ---
+        // 计算 B, H, q_blocks, k_blocks
+        // size_t B_seq = past_lens.size(0);
+        // size_t H = q.size(1) / S;
+        size_t max_q_len = 0;
+        for (size_t b = 0; b < B_seq; b++) {
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            max_q_len = std::max(max_q_len, static_cast<size_t>(q_len_for_batch));
+        }
+        size_t q_blocks = div_up(max_q_len, block_size);
+        size_t k_blocks = div_up(max_context_len, block_size);
+        // 分配 bool 类型 PlainTensor
+        sparse_attention_mask.resize<bool>({B_seq, H, q_blocks, k_blocks});
+        // TODO:默认全部初始化为 false,后续在execute的sparse attention stage1中实时计算出mask的实际值
+        std::memset(sparse_attention_mask.ptr<bool>(), 0, B_seq * H * q_blocks * k_blocks * sizeof(bool));
+        // 可选：全部激活（示例）
+        for (size_t b = 0; b < B_seq; ++b) {
+            for (size_t h = 0; h < H; ++h) {
+                for (size_t q_blk = 0; q_blk < q_blocks; ++q_blk) {
+                    for (size_t k_blk = 0; k_blk < k_blocks; ++k_blk) {
+                        // 对称点 (q_blocks/2, k_blocks/2)，左上和右下为true，其余为false
+                        // bool left_top = (q_blk < q_blocks / 2) && (k_blk < k_blocks / 2);
+                        // bool right_bottom = (q_blk >= (q_blocks + 1) / 2) && (k_blk >= (k_blocks + 1) / 2);
+                        // sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0] = left_top || right_bottom;
+
+                        // 所有mask为true
+                        sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0] = true;
+
+                        // 中间一个block设置为false
+                        // if (q_blk == q_blocks / 2 && k_blk == k_blocks / 2) {
+                        //     sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0] = false;
+                        // } else {
+                        //     sparse_attention_mask.ptr<bool>(b, h, q_blk, k_blk)[0] = true;
+                        // }
+                    }
+                }
+            }
+        }
 
         _helper.init(H,
                      S,
@@ -3823,6 +4065,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         PlainTensor output_emb;
         PlainTensor output_score;
 
+        PlainTensor sparse_attention_mask; // [B, H, q_blocks, k_blocks], bool类型
+
         init(inputs,
              outputs,
              q,
@@ -3843,7 +4087,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
              rotation_deltas,
              rotation_trig_lut,
              output_emb,
-             output_score);
+             output_score,
+             sparse_attention_mask);
 
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
@@ -3869,7 +4114,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                 block_indices,
                 block_indices_begins,
                 alibi_slopes,
-                score_aggregation_window);
+                score_aggregation_window,
+                sparse_attention_mask);
     }
 };
 #endif
