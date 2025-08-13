@@ -75,6 +75,7 @@
 #include "utils/node_dumper.h"
 #include "utils/verbose.h"
 #include "weights_cache.hpp"
+#include "linux_perf.hpp"
 
 #if (OV_THREAD == OV_THREAD_TBB || OV_THREAD == OV_THREAD_TBB_AUTO)
 #    include <tbb/task.h>
@@ -1208,6 +1209,7 @@ bool Graph::ProcessDynNodes() const {
 
 void Graph::PushInputData(const std::size_t& index, const ov::SoPtr<ITensor>& input) {
     OPENVINO_ASSERT(IsReady(), "Wrong state. Topology not ready.");
+    auto prof=LinuxPerf::Profile("Graph::PushInputData");
     if (index < inputNodes.size() && inputNodes[index]) {
         auto node = inputNodes[index];
         auto childEdge = node->getChildEdgeAt(0);
@@ -1239,7 +1241,7 @@ void Graph::PushInputData(const std::size_t& index, const ov::SoPtr<ITensor>& in
 // suppose always being shared infer_request intel_cpu::Tensor to Graph if isDynamic.
 void Graph::PullOutputData(std::unordered_map<std::size_t, ov::SoPtr<ITensor>>& output) {
     OPENVINO_ASSERT(IsReady(), "Wrong state. Topology not ready.");
-
+    auto prof=LinuxPerf::Profile("Graph::PullOutputData");
     for (size_t output_index = 0; output_index < outputNodes.size(); ++output_index) {
         auto node = outputNodes[output_index];
         auto parentEdge = node->getParentEdgeAt(0);
@@ -1352,6 +1354,8 @@ VecMemoryDescs Graph::getOutputMemoryDescriptors() const {
 
 void Graph::InferStatic(SyncInferRequest* request, int numaId) {
     for (const auto& node : m_executableGraphNodes) {
+        auto prof = LinuxPerf::Profile("Graph::InferStatic::ExecuteNode: type:" + node->getTypeStr() +
+                                       " name:" + node->getName());
         ExecuteNodeWithCatch(node, request, numaId);
     }
 }
@@ -1625,6 +1629,8 @@ void Graph::InferDynamic(SyncInferRequest* request, int numaId, UpdateStrategy&&
 
         for (; inferCounter < stopIndx; ++inferCounter) {
             auto& node = m_executableGraphNodes[inferCounter];
+            auto prof = LinuxPerf::Profile("Graph::InferDynamic::ExecuteNode: type:" + node->getTypeStr() +
+                                           " name:" + node->getName());
 
             ExecuteNodeWithCatch(node, request, numaId);
         }
