@@ -829,7 +829,9 @@ struct MHAHelper {
                               const PlainTensor& alibi_slopes,
                               float* score_output,
                               size_t q_start_idx_score,
-                              const ScoreAggregationInfo* score_info_ptr) {
+                              const ScoreAggregationInfo* score_info_ptr,
+                              size_t batch_in_seq = 0,
+                              const std::vector<PlainTensor>& sparse_attention_mask = {}) {
         auto q_start = q_blk * _block_size;
         auto q_end = std::min(q_start + _block_size, q_len);
         auto q_cnt = q_end - q_start;
@@ -851,6 +853,12 @@ struct MHAHelper {
             // 1 1 1 0 ...
             // just computing the positions of 1 should be enough
             for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
+                // sparse attention mask filtering
+                if (!sparse_attention_mask.empty() &&
+                    !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
+                    // Skip GEMM for this block if mask is false
+                    continue;
+                }
                 if (_params.is_sage_attn) {
 #    if defined(OPENVINO_ARCH_X86_64)
                     auto* q_ptr = _quantized_q.ptr<int8_t>(ithr);
@@ -877,6 +885,19 @@ struct MHAHelper {
                                                      nullptr,
                                                      _wsp.data() + ithr * _wsp_size_per_thread,
                                                      _qk_scratch_a ? _qk_scratch_a.ptr<DATA_TYPE>(ithr, 0) : nullptr);
+                }
+            }
+
+            // sparse attention mask: 对应q_blk, k_blk的mask为false时，score置为-inf（整个q_blk的score buffer）
+            if (!sparse_attention_mask.empty()) {
+                float* score_base = _weight.ptr<float>(ithr, h - hq_beg, 0);
+                for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
+                    if (!sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        for (size_t m = 0; m < q_cnt; m++) {
+                            float* score_blk = score_base + m * cur_kv_len_blocks * _block_size + k_blk * _block_size;
+                            std::fill(score_blk, score_blk + _block_size, -std::numeric_limits<float>::infinity());
+                        }
+                    }
                 }
             }
 
@@ -952,6 +973,11 @@ struct MHAHelper {
 
             // for each weight block, loop through all value block
             for (size_t v_blk = 0; v_blk < cur_kv_len_blocks; v_blk++) {
+                // sparse attention mask filtering for value blocks
+                if (!sparse_attention_mask.empty() &&
+                    !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, v_blk)[0]) {
+                    continue;
+                }
                 DATA_TYPE* v_ptr = nullptr;
                 if (q_is_xf16 || !q_cache_is_same) {
                     v_ptr = wv_scratch_b.ptr<DATA_TYPE>(v_blk, hk);
@@ -1155,14 +1181,21 @@ struct MHAHelper {
                             size_t q_len,
                             size_t cur_kv_len,
                             const PlainTensor& alibi_slopes,
-                            float* score_output) {
+                            float* score_output,
+                            const std::vector<PlainTensor>& sparse_attention_mask) {
 #    if defined(OPENVINO_ARCH_X86_64)
         if (any_of(_fastpath_valid_prec, ov::element::bf16, ov::element::f16)) {
             _gemv->tile_config();
             for (size_t pk = 0, i = 0; pk < cur_kv_len; pk += _block_size, i++) {
                 auto block_number = block_table[i];
                 for (size_t pq = 0; pq < q_len; pq++) {
+                    size_t q_blk = pq / _block_size;
                     for (size_t h = hq_beg; h < hq_end; h++) {
+                        size_t k_blk = pk / _block_size;
+                        // Only process blocks where mask == true
+                        if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                            continue;
+                        }
                         (*_gemv)(
                             query.ptr<DATA_TYPE>(h, pq),
                             present_key.ptr<typename ov::element_type_traits<KEY_PREC>::value_type>(block_number, hk),
@@ -1176,7 +1209,13 @@ struct MHAHelper {
             for (size_t pk = 0, i = 0; pk < cur_kv_len; pk += _block_size, i++) {
                 auto block_number = block_table[i];
                 for (size_t pq = 0; pq < q_len; pq++) {
+                    size_t q_blk = pq / _block_size;
                     for (size_t h = hq_beg; h < hq_end; h++) {
+                        size_t k_blk = pk / _block_size;
+                        // Only process blocks where mask == true
+                        if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                            continue;
+                        }
                         if constexpr (any_of(KEY_PREC, ov::element::i8, ov::element::u8, ov::element::u4)) {
                             dot_product_block_quantized<DATA_TYPE, KEY_PREC>(
                                 query.ptr<DATA_TYPE>(h, pq),
@@ -1204,6 +1243,7 @@ struct MHAHelper {
 #    endif
 
         for (size_t pq = 0; pq < q_len; pq++) {
+            size_t q_blk = pq / _block_size;
             for (size_t h = hq_beg; h < hq_end; h++) {
                 // apply attention mask & sofmax
                 float* alibi_lookup = nullptr;
@@ -1211,6 +1251,14 @@ struct MHAHelper {
                 if (alibi_slopes) {
                     alibi_slope = alibi_slopes.ptr<float>()[h];
                     alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - cur_kv_len;
+                }
+                // mask: softmax前将mask==false的位置赋值为-inf
+                // TODO: parallel process outside q loop
+                for (size_t k = 0; k < cur_kv_len; ++k) {
+                    size_t k_blk = k / _block_size;
+                    if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        _weight.ptr<float>(ithr, h - hq_beg, pq)[k] = -std::numeric_limits<float>::infinity();
+                    }
                 }
                 attn_softmax_kernel<float>(_weight.ptr<float>(ithr, h - hq_beg, pq),
                                            _weight.ptr<float>(ithr, h - hq_beg, pq),
@@ -1238,7 +1286,13 @@ struct MHAHelper {
         for (size_t pv = 0, i = 0; pv < cur_kv_len; pv += _block_size, i++) {
             auto block_number = block_table[i];
             for (size_t pq = 0; pq < q_len; pq++) {
+                size_t q_blk = pq / _block_size;
                 for (size_t h = hq_beg; h < hq_end; h++) {
+                    size_t k_blk = pv / _block_size;
+                    // Only process blocks where mask == true
+                    if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        continue;
+                    }
                     if constexpr (any_of(VALUE_PREC, ov::element::u8, ov::element::u4)) {
                         attn_acc_value_block_quantized<uint8_t, VALUE_PREC>(
                             _output.ptr<float>(ithr, pq, h),
@@ -1506,7 +1560,8 @@ struct MHA {
                          const PlainTensor& block_indices,
                          const PlainTensor& block_indices_begins,
                          const PlainTensor& alibi_slopes,
-                         const PlainTensor& score_aggregation_window) {
+                         const PlainTensor& score_aggregation_window,
+                         const std::vector<PlainTensor>& sparse_attention_mask) {
         auto Hk = v_cache.m_dims[1];
 
         constexpr bool q_is_xf16 = any_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
@@ -1667,7 +1722,8 @@ struct MHA {
                     1UL,
                     cur_kv_len,
                     alibi_slopes,
-                    score_output);
+                    score_output,
+                    sparse_attention_mask);
             } else {
                 const auto batch_in_reorder = item.batch_in_reorder;
                 const auto q_blk = item.q_block_id;
@@ -1739,7 +1795,9 @@ struct MHA {
                         alibi_slopes,
                         score_output,
                         q_start_idx_score,
-                        score_info_ptr);
+                        score_info_ptr,
+                        batch_in_seq,
+                        sparse_attention_mask);
                 }
 #    else
                 _helper.exec_kernel_multiple(
@@ -1760,8 +1818,10 @@ struct MHA {
                     alibi_slopes,
                     score_output,
                     q_start_idx_score,
-                    score_info_ptr);
-#    endif
+                    score_info_ptr,
+                    batch_in_seq,
+                    sparse_attention_mask);
+            #    endif
             }
         });
         if (output_score) {
@@ -1797,7 +1857,8 @@ struct MHA {
                     const PlainTensor& block_indices,
                     const PlainTensor& block_indices_begins,
                     const PlainTensor& alibi_slopes,
-                    const PlainTensor& score_aggregation_window) {
+                    const PlainTensor& score_aggregation_window,
+                    const std::vector<PlainTensor>& sparse_attention_mask) {
         _workitems
             .reset(query, past_lens, subsequence_begins, block_indices, block_indices_begins, _helper._block_size);
         if (output_score) {
@@ -1806,33 +1867,46 @@ struct MHA {
 
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
-        if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
-            exec_loop_mixed(query,
-                            present_key,
-                            present_value,
-                            output_emb,
-                            output_score,
-                            max_context_len,
-                            past_lens,
-                            subsequence_begins,
-                            block_indices,
-                            block_indices_begins,
-                            alibi_slopes,
-                            score_aggregation_window);
-        } else {
-            _helper.exec_loop_bhl(query,
-                                  present_key,
-                                  present_value,
-                                  output_emb,
-                                  output_score,
-                                  max_context_len,
-                                  past_lens,
-                                  subsequence_begins,
-                                  block_indices,
-                                  block_indices_begins,
-                                  alibi_slopes,
-                                  score_aggregation_window);
-        }
+        // if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
+        //     exec_loop_mixed(query,
+        //                     present_key,
+        //                     present_value,
+        //                     output_emb,
+        //                     output_score,
+        //                     max_context_len,
+        //                     past_lens,
+        //                     subsequence_begins,
+        //                     block_indices,
+        //                     block_indices_begins,
+        //                     alibi_slopes,
+        //                     score_aggregation_window);
+        // } else {
+        //     _helper.exec_loop_bhl(query,
+        //                           present_key,
+        //                           present_value,
+        //                           output_emb,
+        //                           output_score,
+        //                           max_context_len,
+        //                           past_lens,
+        //                           subsequence_begins,
+        //                           block_indices,
+        //                           block_indices_begins,
+        //                           alibi_slopes,
+        //                           score_aggregation_window);
+        // }
+        exec_loop_mixed(query,
+                        present_key,
+                        present_value,
+                        output_emb,
+                        output_score,
+                        max_context_len,
+                        past_lens,
+                        subsequence_begins,
+                        block_indices,
+                        block_indices_begins,
+                        alibi_slopes,
+                        score_aggregation_window,
+                        sparse_attention_mask);
     }
 };
 
@@ -1871,7 +1945,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
               int32_t& xattention_block_size,
               int32_t& xattention_stride,
               PlainTensor& output_emb,
-              PlainTensor& output_score) {
+              PlainTensor& output_score,
+              std::vector<PlainTensor>& sparse_attention_mask) {
         q.reset(inputs[ID_Q]);  // [B_token, H * S]
         k.reset(inputs[ID_K]);
         v.reset(inputs[ID_V]);
@@ -2059,6 +2134,96 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
 
+        // --- 创建和初始化 sparse_attention_mask ---
+        sparse_attention_mask.clear();
+        size_t k_blocks = div_up(max_context_len, block_size);
+        for (size_t b = 0; b < B_seq; ++b) {
+            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
+            size_t q_blocks = div_up(static_cast<size_t>(q_len_for_batch), block_size);
+            PlainTensor mask;
+            mask.resize<bool>({H, q_blocks, k_blocks});
+            // 默认全部初始化为 false
+            std::memset(mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
+            // 可选：全部激活（示例）
+            for (size_t h = 0; h < H; ++h) {
+                for (size_t q_blk = 0; q_blk < q_blocks; ++q_blk) {
+                    for (size_t k_blk = 0; k_blk < k_blocks; ++k_blk) {
+                        // 对称点 (q_blocks/2, k_blocks/2)，左上和右下为true，其余为false
+                        // bool left_top = (q_blk < q_blocks / 2) && (k_blk < k_blocks / 2);
+                        // bool right_bottom = (q_blk >= (q_blocks + 1) / 2) && (k_blk >= (k_blocks + 1) / 2);
+                        // mask.ptr<bool>(h, q_blk, k_blk)[0] = left_top || right_bottom;
+
+                        // 所有mask为true
+                        mask.ptr<bool>(h, q_blk, k_blk)[0] = true;
+
+                        // // 中间一个block设置为false
+                        // if (q_blk == q_blocks / 2 && k_blk == k_blocks / 2) {
+                        //     mask.ptr<bool>(h, q_blk, k_blk)[0] = false;
+                        // } else {
+                        //     mask.ptr<bool>(h, q_blk, k_blk)[0] = true;
+                        // }
+                    }
+                }
+            }
+            sparse_attention_mask.push_back(std::move(mask));
+        }
+
+        // --- 广播 sparse_attention_mask 以支持不同 block size ---
+        // 输入的 mask 可能是[h, q_blocks_orig, k_blocks_orig]，需要广播到[h, q_blocks, k_blocks]
+        auto broadcast_sparse_attention_mask =
+            [](std::vector<PlainTensor>& mask_vec, size_t src_block_size, size_t dst_block_size) {
+                if (src_block_size == dst_block_size)
+                    return;
+                if (src_block_size % dst_block_size != 0) {
+                    OPENVINO_THROW("not supported 当sparse_attention_BlockSize=",
+                                   src_block_size,
+                                   " 但block_size=",
+                                   dst_block_size);
+                }
+                size_t scale = src_block_size / dst_block_size;
+                for (auto& mask : mask_vec) {
+                    auto shape = mask.shape();
+                    size_t H = shape[0];
+                    size_t q_blocks_orig = shape[1];
+                    size_t k_blocks_orig = shape[2];
+                    size_t q_blocks = q_blocks_orig * scale;
+                    size_t k_blocks = k_blocks_orig * scale;
+                    PlainTensor new_mask;
+                    new_mask.resize<bool>({H, q_blocks, k_blocks});
+                    std::memset(new_mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
+                    for (size_t h = 0; h < H; ++h) {
+                        for (size_t q_blk = 0; q_blk < q_blocks_orig; ++q_blk) {
+                            for (size_t k_blk = 0; k_blk < k_blocks_orig; ++k_blk) {
+                                bool val = mask.ptr<bool>(h, q_blk, k_blk)[0];
+                                for (size_t dq = 0; dq < scale; ++dq) {
+                                    for (size_t dk = 0; dk < scale; ++dk) {
+                                        new_mask.ptr<bool>(h, q_blk * scale + dq, k_blk * scale + dk)[0] = val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    mask = std::move(new_mask);
+                }
+            };
+        // 原始sparse attention mask的block_size，后续通过Page Attention Node参数指定
+        // const size_t sparse_attention_BlockSize = 128;
+        const size_t sparse_attention_BlockSize = 32;
+        // 只支持 block_size <= sparse_attention_BlockSize 且 sparse_attention_BlockSize 是 block_size 的整数倍
+        if (block_size != sparse_attention_BlockSize) {
+            if (block_size > sparse_attention_BlockSize) {
+                OPENVINO_THROW("not supported: block_size > sparse_attention_BlockSize");
+            }
+            if (sparse_attention_BlockSize % block_size != 0) {
+                OPENVINO_THROW("not supported: sparse_attention_BlockSize ",
+                               sparse_attention_BlockSize,
+                               " 不是 block_size ",
+                               block_size,
+                               " 的整数倍");
+            }
+            broadcast_sparse_attention_mask(sparse_attention_mask, sparse_attention_BlockSize, block_size);
+        }
+
         _helper.init(H,
                      S,
                      SV,
@@ -2151,6 +2316,10 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         PlainTensor output_emb;
         PlainTensor output_score;
 
+        std::vector<PlainTensor>
+            sparse_attention_mask; // 每个vector对应一个batch，每个PlainTensor对应一个batch，格式：[H,
+                                   // q_blocks, k_blocks], bool类型
+
         init(inputs,
              outputs,
              q,
@@ -2174,7 +2343,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
              xattention_block_size,
              xattention_stride,
              output_emb,
-             output_score);
+             output_score,
+             sparse_attention_mask);
 
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
@@ -2200,7 +2370,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                 block_indices,
                 block_indices_begins,
                 alibi_slopes,
-                score_aggregation_window);
+                score_aggregation_window,
+                sparse_attention_mask);
     }
 };
 #endif
