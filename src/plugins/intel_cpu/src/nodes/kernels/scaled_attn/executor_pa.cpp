@@ -1182,7 +1182,8 @@ struct MHAHelper {
                             size_t cur_kv_len,
                             const PlainTensor& alibi_slopes,
                             float* score_output,
-                            const std::vector<PlainTensor>& sparse_attention_mask) {
+                            size_t batch_in_seq = 0,
+                            const std::vector<PlainTensor>& sparse_attention_mask = {}) {
 #    if defined(OPENVINO_ARCH_X86_64)
         if (any_of(_fastpath_valid_prec, ov::element::bf16, ov::element::f16)) {
             _gemv->tile_config();
@@ -1193,7 +1194,8 @@ struct MHAHelper {
                     for (size_t h = hq_beg; h < hq_end; h++) {
                         size_t k_blk = pk / _block_size;
                         // Only process blocks where mask == true
-                        if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        if (!sparse_attention_mask.empty() &&
+                            !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
                             continue;
                         }
                         (*_gemv)(
@@ -1213,7 +1215,8 @@ struct MHAHelper {
                     for (size_t h = hq_beg; h < hq_end; h++) {
                         size_t k_blk = pk / _block_size;
                         // Only process blocks where mask == true
-                        if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        if (!sparse_attention_mask.empty() &&
+                            !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
                             continue;
                         }
                         if constexpr (any_of(KEY_PREC, ov::element::i8, ov::element::u8, ov::element::u4)) {
@@ -1256,7 +1259,7 @@ struct MHAHelper {
                 // TODO: parallel process outside q loop
                 for (size_t k = 0; k < cur_kv_len; ++k) {
                     size_t k_blk = k / _block_size;
-                    if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                    if (!sparse_attention_mask.empty() && !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
                         _weight.ptr<float>(ithr, h - hq_beg, pq)[k] = -std::numeric_limits<float>::infinity();
                     }
                 }
@@ -1290,7 +1293,8 @@ struct MHAHelper {
                 for (size_t h = hq_beg; h < hq_end; h++) {
                     size_t k_blk = pv / _block_size;
                     // Only process blocks where mask == true
-                    if (!sparse_attention_mask[0].ptr<bool>(h, q_blk, k_blk)[0]) {
+                    if (!sparse_attention_mask.empty() &&
+                        !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
                         continue;
                     }
                     if constexpr (any_of(VALUE_PREC, ov::element::u8, ov::element::u4)) {
@@ -1591,7 +1595,7 @@ struct MHA {
                          const PlainTensor& block_indices_begins,
                          const PlainTensor& alibi_slopes,
                          const PlainTensor& score_aggregation_window,
-                         const std::vector<PlainTensor>& sparse_attention_mask) {
+                         const std::vector<PlainTensor>& sparse_attention_mask = {}) {
         auto Hk = v_cache.m_dims[1];
 
         constexpr bool q_is_xf16 = any_of(precision_of<DATA_TYPE>::value, ov::element::bf16, ov::element::f16);
@@ -1753,6 +1757,7 @@ struct MHA {
                     cur_kv_len,
                     alibi_slopes,
                     score_output,
+                    batch_in_seq,
                     sparse_attention_mask);
             } else {
                 const auto batch_in_reorder = item.batch_in_reorder;
