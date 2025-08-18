@@ -1343,7 +1343,8 @@ struct MHAHelper {
                        const PlainTensor& block_indices,
                        const PlainTensor& block_indices_begins,
                        const PlainTensor& alibi_slopes,
-                       const PlainTensor& score_aggregation_window) {
+                       const PlainTensor& score_aggregation_window,
+                       const std::vector<PlainTensor>& sparse_attention_mask = {}) {
         auto B = past_lens.size(0);
         auto q_len = query.size(2);
         auto kv_len_in_blocks = div_up(max_context_len, _block_size);
@@ -1388,13 +1389,20 @@ struct MHAHelper {
 
             // kv_len must be valid
             auto pk = pk_in_blocks * _block_size;
+            size_t k_blk = pk / _block_size;
             if (pk < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pk_in_blocks];
 #    if defined(OPENVINO_ARCH_X86_64)
                 if (any_of(_fastpath_valid_prec, ov::element::bf16, ov::element::f16)) {
                     _gemv->tile_config();
                     for (size_t pq = 0; pq < q_len; pq++) {
+                        size_t q_blk = pq / _block_size;
                         for (size_t h = hq_beg; h < hq_end; h++) {
+                            // sparse attention mask check
+                            if (!sparse_attention_mask.empty() &&
+                                !sparse_attention_mask[b].ptr<bool>(h, q_blk, k_blk)[0]) {
+                                continue;
+                            }
                             (*_gemv)(
                                 query.ptr<DATA_TYPE>(b, h, pq),
                                 key_cache.ptr<typename ov::element_type_traits<KEY_PREC>::value_type>(block_number, hk),
@@ -1405,7 +1413,13 @@ struct MHAHelper {
                 } else {
 #    endif
                     for (size_t pq = 0; pq < q_len; pq++) {
+                        size_t q_blk = pq / _block_size;
                         for (size_t h = hq_beg; h < hq_end; h++) {
+                            // sparse attention mask check
+                            if (!sparse_attention_mask.empty() &&
+                                !sparse_attention_mask[b].ptr<bool>(h, q_blk, k_blk)[0]) {
+                                continue;
+                            }
                             if constexpr (any_of(KEY_PREC, ov::element::i8, ov::element::u8, ov::element::u4)) {
                                 dot_product_block_quantized<DATA_TYPE, KEY_PREC>(
                                     query.ptr<DATA_TYPE>(b, h, pq),
@@ -1442,6 +1456,16 @@ struct MHAHelper {
             if (alibi_slopes) {
                 alibi_slope = alibi_slopes.ptr<float>()[h];
                 alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - cur_kv_len;
+            }
+            // sparse attention mask: mask==false 的位置赋值为-inf
+            if (!sparse_attention_mask.empty()) {
+                size_t q_blk = pq / _block_size;
+                for (size_t k = 0; k < cur_kv_len; ++k) {
+                    size_t k_blk = k / _block_size;
+                    if (!sparse_attention_mask[b].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        _weight_bhl.ptr<float>(b, h, pq)[k] = -std::numeric_limits<float>::infinity();
+                    }
+                }
             }
             attn_softmax_kernel<float>(_weight_bhl.ptr<float>(b, h, pq),
                                        _weight_bhl.ptr<float>(b, h, pq),
@@ -1498,8 +1522,14 @@ struct MHAHelper {
             // kv_len must be valid
             if (pv < context_len) {
                 auto block_number = block_indices.ptr<int32_t>()[block_indices_begins.ptr<int32_t>()[b] + pv_in_blocks];
+                size_t k_blk = pv / _block_size;
                 for (size_t pq = 0; pq < q_len; pq++) {
+                    size_t q_blk = pq / _block_size;
                     for (size_t h = hq_beg; h < hq_end; h++) {
+                        // sparse attention mask check
+                        if (!sparse_attention_mask.empty() && !sparse_attention_mask[b].ptr<bool>(h, q_blk, k_blk)[0]) {
+                            continue;
+                        }
                         if constexpr (any_of(VALUE_PREC, ov::element::u8, ov::element::u4)) {
                             attn_acc_value_block_quantized<uint8_t, VALUE_PREC>(
                                 _output_bhl.ptr<float>(b, pv_in_blocks, h, pq),
@@ -1867,46 +1897,48 @@ struct MHA {
 
         auto nthr = static_cast<size_t>(parallel_get_max_threads());
 
-        // if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
-        //     exec_loop_mixed(query,
-        //                     present_key,
-        //                     present_value,
-        //                     output_emb,
-        //                     output_score,
-        //                     max_context_len,
-        //                     past_lens,
-        //                     subsequence_begins,
-        //                     block_indices,
-        //                     block_indices_begins,
-        //                     alibi_slopes,
-        //                     score_aggregation_window);
-        // } else {
-        //     _helper.exec_loop_bhl(query,
-        //                           present_key,
-        //                           present_value,
-        //                           output_emb,
-        //                           output_score,
-        //                           max_context_len,
-        //                           past_lens,
-        //                           subsequence_begins,
-        //                           block_indices,
-        //                           block_indices_begins,
-        //                           alibi_slopes,
-        //                           score_aggregation_window);
-        // }
-        exec_loop_mixed(query,
-                        present_key,
-                        present_value,
-                        output_emb,
-                        output_score,
-                        max_context_len,
-                        past_lens,
-                        subsequence_begins,
-                        block_indices,
-                        block_indices_begins,
-                        alibi_slopes,
-                        score_aggregation_window,
-                        sparse_attention_mask);
+        if (past_lens.m_dims[0] >= nthr || _workitems.get_reorder_max_batch_size() > 0) {
+            exec_loop_mixed(query,
+                            present_key,
+                            present_value,
+                            output_emb,
+                            output_score,
+                            max_context_len,
+                            past_lens,
+                            subsequence_begins,
+                            block_indices,
+                            block_indices_begins,
+                            alibi_slopes,
+                            score_aggregation_window,
+                            sparse_attention_mask);
+        } else {
+            _helper.exec_loop_bhl(query,
+                                  present_key,
+                                  present_value,
+                                  output_emb,
+                                  output_score,
+                                  max_context_len,
+                                  past_lens,
+                                  subsequence_begins,
+                                  block_indices,
+                                  block_indices_begins,
+                                  alibi_slopes,
+                                  score_aggregation_window,
+                                  sparse_attention_mask);
+        }
+        // exec_loop_mixed(query,
+        //                 present_key,
+        //                 present_value,
+        //                 output_emb,
+        //                 output_score,
+        //                 max_context_len,
+        //                 past_lens,
+        //                 subsequence_begins,
+        //                 block_indices,
+        //                 block_indices_begins,
+        //                 alibi_slopes,
+        //                 score_aggregation_window,
+        //                 sparse_attention_mask);
     }
 };
 
