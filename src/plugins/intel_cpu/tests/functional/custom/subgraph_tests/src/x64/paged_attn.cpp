@@ -107,12 +107,8 @@ public:
         auto silding_windows =
             std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<int32_t>{0});
         auto alibi_slopes = std::make_shared<ov::op::v0::Constant>(ov::element::f32, Shape{0}, std::vector<float>{});
-        // for 100 tokens
-        //  auto max_context_len =
-        //      std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<float>{128});
-        // for 1000 tokens
         auto max_context_len =
-            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<float>{1028});
+            std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<float>{128});
         auto score_aggregation_window =
             std::make_shared<ov::op::v0::Constant>(ov::element::i32, Shape{}, std::vector<int32_t>{0});
         auto rotated_block_indices =
@@ -238,7 +234,6 @@ public:
         targetDevice = ov::test::utils::DEVICE_CPU;
         rel_threshold = 1e-2f;
         configuration[ov::hint::inference_precision.name()] = ov::element::f32;
-        configuration[ov::hint::kv_cache_precision.name()] = ov::element::f32;
         if (inType == ElementType::bf16) {
             configuration[ov::hint::inference_precision.name()] = ov::element::bf16;
             rel_threshold = 0.01f;
@@ -317,16 +312,8 @@ public:
             int32_t total_blocks = intel_cpu::div_up(past_len_count, 32);
             ov::Tensor past_lens(ov::element::i32, {batch_size_in_sequences}),
                 subsequence_begins(ov::element::i32, {batch_size_in_sequences + 1}),
-                block_indices_begins(ov::element::i32, {batch_size_in_sequences + 1});
-
-            // block_indices(ov::element::i32, {static_cast<size_t>(total_blocks)});
-            // for 100 tokens
-            // size_t num_blocks = 4;
-            // for 1000 tokens
-            size_t num_blocks = 32;
-
-            ov::Tensor block_indices(ov::element::i32, {num_blocks});
-
+                block_indices_begins(ov::element::i32, {batch_size_in_sequences + 1}),
+                block_indices(ov::element::i32, {static_cast<size_t>(total_blocks)});
             int32_t *past_lens_data = reinterpret_cast<int32_t*>(past_lens.data()),
                     *subsequence_begins_data = reinterpret_cast<int32_t*>(subsequence_begins.data()),
                     *block_indices_begins_data = reinterpret_cast<int32_t*>(block_indices_begins.data()),
@@ -395,18 +382,10 @@ public:
     std::vector<ov::Tensor> run_test(std::shared_ptr<ov::Model> model, bool extendBlockIndices) {
         function = model;
         prepare();
-        // 动态计算最大 block_nums
-        const size_t block_size = 32;
-        size_t max_token = 0;
-        for (const auto& shapes : targetStaticShapes) {
-            if (!shapes.empty() && !shapes[0].empty()) {
-                max_token = std::max(max_token, static_cast<size_t>(shapes[0][0]));
-            }
-        }
-        size_t block_nums = (max_token + block_size - 1) / block_size;
         for (const auto& input : compiledModel.inputs()) {
             for (auto& name : input.get_names()) {
                 auto cache_precision = input.get_element_type();
+                const size_t block_nums = 4;
                 ov::PartialShape pshape;
                 if (name.find("key_cache.") == 0) {
                     pshape = input.get_partial_shape();
@@ -428,11 +407,7 @@ public:
             for (const auto& input : inputs) {
                 inferRequest.set_tensor(input.first, input.second);
             }
-            auto t_start = std::chrono::high_resolution_clock::now();
             inferRequest.infer();
-            auto t_end = std::chrono::high_resolution_clock::now();
-            double duration_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-            std::cout << "my test inferRequest.infer() 耗时: " << duration_ms << " ms" << std::endl;
             auto outputTensor = inferRequest.get_output_tensor(0);
             ov::Tensor copy{outputTensor.get_element_type(), outputTensor.get_shape()};
             outputTensor.copy_to(copy);
@@ -486,22 +461,10 @@ const std::vector<ov::AnyMap> additional_configs = {{{ov::intel_cpu::enable_sage
                                                     {{ov::intel_cpu::enable_sage_attn.name(), false}}};
 const std::vector<InputShapes> inputShapeAndReorders = {  // greedy search
     {
-        // // L1, B, H, S
-        // {{-1, 1, 8, 64}, {{10, 1, 8, 64}, {1, 1, 8, 64}, {1, 1, 8, 64}}},
-        // // B, L0, H, S
-        // {{-1, 1, 8, 64}, {{0, 1, 8, 64}, {10, 1, 8, 64}, {11, 1, 8, 64}}},
-
-        // for 100 tokens prefill
-        // // L1, B, H, S
-        // {{-1, 1, 8, 64}, {{100, 1, 8, 64}}},
-        // // B, L0, H, S
-        // {{-1, 1, 8, 64}, {{0, 1, 8, 64}}},
-
-        // for 1000 tokens prefill
         // L1, B, H, S
-        {{-1, 1, 8, 64}, {{1000, 1, 8, 64}}},
+        {{-1, 1, 8, 64}, {{10, 1, 8, 64}, {1, 1, 8, 64}, {1, 1, 8, 64}}},
         // B, L0, H, S
-        {{-1, 1, 8, 64}, {{0, 1, 8, 64}}},
+        {{-1, 1, 8, 64}, {{0, 1, 8, 64}, {10, 1, 8, 64}, {11, 1, 8, 64}}},
     }};
 
 INSTANTIATE_TEST_SUITE_P(smoke_PagedAttnVSSDPATest,

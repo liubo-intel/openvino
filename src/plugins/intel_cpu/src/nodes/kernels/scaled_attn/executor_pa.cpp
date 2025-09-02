@@ -888,7 +888,7 @@ struct MHAHelper {
                 }
             }
 
-            // sparse attention mask: 对应q_blk, k_blk的mask为false时，score置为-inf（整个q_blk的score buffer）
+            // sparse attention mask: set score to -inf for (q_blk, k_blk) where
             if (!sparse_attention_mask.empty()) {
                 float* score_base = _weight.ptr<float>(ithr, h - hq_beg, 0);
                 for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
@@ -1931,19 +1931,6 @@ struct MHA {
                                   score_aggregation_window,
                                   sparse_attention_mask);
         }
-        // exec_loop_mixed(query,
-        //                 present_key,
-        //                 present_value,
-        //                 output_emb,
-        //                 output_score,
-        //                 max_context_len,
-        //                 past_lens,
-        //                 subsequence_begins,
-        //                 block_indices,
-        //                 block_indices_begins,
-        //                 alibi_slopes,
-        //                 score_aggregation_window,
-        //                 sparse_attention_mask);
     }
 };
 
@@ -2171,7 +2158,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
 
-        // --- 创建和初始化 sparse_attention_mask ---
+        // --- Create and initialize sparse_attention_mask ---
         sparse_attention_mask.clear();
         size_t k_blocks = div_up(max_context_len, block_size);
         for (size_t b = 0; b < B_seq; ++b) {
@@ -2179,21 +2166,21 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             size_t q_blocks = div_up(static_cast<size_t>(q_len_for_batch), block_size);
             PlainTensor mask;
             mask.resize<bool>({H, q_blocks, k_blocks});
-            // 默认全部初始化为 false
+            // Default initialize all to false
             std::memset(mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
-            // 可选：全部激活（示例）
+            // Optional: activate all (example)
             for (size_t h = 0; h < H; ++h) {
                 for (size_t q_blk = 0; q_blk < q_blocks; ++q_blk) {
                     for (size_t k_blk = 0; k_blk < k_blocks; ++k_blk) {
-                        // 对称点 (q_blocks/2, k_blocks/2)，左上和右下为true，其余为false
-                        // bool left_top = (q_blk < q_blocks / 2) && (k_blk < k_blocks / 2);
+                        // At the symmetric point (q_blocks/2, k_blocks/2), set the upper-left and lower-right blocks
+                        // to true, others to false bool left_top = (q_blk < q_blocks / 2) && (k_blk < k_blocks / 2);
                         // bool right_bottom = (q_blk >= (q_blocks + 1) / 2) && (k_blk >= (k_blocks + 1) / 2);
                         // mask.ptr<bool>(h, q_blk, k_blk)[0] = left_top || right_bottom;
 
-                        // 所有mask为true
+                        // All masks are set to true
                         mask.ptr<bool>(h, q_blk, k_blk)[0] = true;
 
-                        // // 中间一个block设置为false
+                        // Set the middle block to false
                         // if (q_blk == q_blocks / 2 && k_blk == k_blocks / 2) {
                         //     mask.ptr<bool>(h, q_blk, k_blk)[0] = false;
                         // } else {
@@ -2205,16 +2192,16 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             sparse_attention_mask.push_back(std::move(mask));
         }
 
-        // --- 广播 sparse_attention_mask 以支持不同 block size ---
-        // 输入的 mask 可能是[h, q_blocks_orig, k_blocks_orig]，需要广播到[h, q_blocks, k_blocks]
+        // --- Broadcast sparse_attention_mask to support different block sizes ---
+        // The input mask may be [h, q_blocks_orig, k_blocks_orig], and needs to be broadcast to [h, q_blocks, k_blocks]
         auto broadcast_sparse_attention_mask =
             [](std::vector<PlainTensor>& mask_vec, size_t src_block_size, size_t dst_block_size) {
                 if (src_block_size == dst_block_size)
                     return;
                 if (src_block_size % dst_block_size != 0) {
-                    OPENVINO_THROW("not supported 当sparse_attention_BlockSize=",
+                    OPENVINO_THROW("not supported: sparse_attention_BlockSize=",
                                    src_block_size,
-                                   " 但block_size=",
+                                   " is not an integer multiple of block_size=",
                                    dst_block_size);
                 }
                 size_t scale = src_block_size / dst_block_size;
@@ -2243,10 +2230,11 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                     mask = std::move(new_mask);
                 }
             };
-        // 原始sparse attention mask的block_size，后续通过Page Attention Node参数指定
-        // const size_t sparse_attention_BlockSize = 128;
+        // The original block_size of the sparse attention mask; can be specified later via the Page Attention Node
+        // parameter const size_t sparse_attention_BlockSize = 128;
         const size_t sparse_attention_BlockSize = 32;
-        // 只支持 block_size <= sparse_attention_BlockSize 且 sparse_attention_BlockSize 是 block_size 的整数倍
+        // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
+        // multiple
         if (block_size != sparse_attention_BlockSize) {
             if (block_size > sparse_attention_BlockSize) {
                 OPENVINO_THROW("not supported: block_size > sparse_attention_BlockSize");
@@ -2254,9 +2242,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             if (sparse_attention_BlockSize % block_size != 0) {
                 OPENVINO_THROW("not supported: sparse_attention_BlockSize ",
                                sparse_attention_BlockSize,
-                               " 不是 block_size ",
-                               block_size,
-                               " 的整数倍");
+                               " is not an integer multiple of block_size ",
+                               block_size);
             }
             broadcast_sparse_attention_mask(sparse_attention_mask, sparse_attention_BlockSize, block_size);
         }
@@ -2354,8 +2341,8 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         PlainTensor output_score;
 
         std::vector<PlainTensor>
-            sparse_attention_mask; // 每个vector对应一个batch，每个PlainTensor对应一个batch，格式：[H,
-                                   // q_blocks, k_blocks], bool类型
+            sparse_attention_mask;  // Each vector element corresponds to a batch, and each PlainTensor corresponds to a
+                                    // batch, with shape: [H, q_blocks, k_blocks], type: bool
 
         init(inputs,
              outputs,
