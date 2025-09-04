@@ -1743,7 +1743,7 @@ struct MHA {
                         score_output = _helper._score_output.template ptr<float>() + score_offset * _helper.H;
                     }
                 }
-
+                // TODO: support second token sparse attention execution
                 _helper.exec_kernel_one_bh(
                     q.slice(0, batch_in_token, batch_in_token),
                     k_cache,
@@ -1758,8 +1758,7 @@ struct MHA {
                     cur_kv_len,
                     alibi_slopes,
                     score_output,
-                    batch_in_seq,
-                    sparse_attention_mask);
+                    batch_in_seq);
             } else {
                 const auto batch_in_reorder = item.batch_in_reorder;
                 const auto q_blk = item.q_block_id;
@@ -1918,6 +1917,7 @@ struct MHA {
                             score_aggregation_window,
                             sparse_attention_mask);
         } else {
+            // TODO: support second token sparse attention execution
             _helper.exec_loop_bhl(query,
                                   present_key,
                                   present_value,
@@ -1929,8 +1929,7 @@ struct MHA {
                                   block_indices,
                                   block_indices_begins,
                                   alibi_slopes,
-                                  score_aggregation_window,
-                                  sparse_attention_mask);
+                                  score_aggregation_window);
         }
     }
 };
@@ -2159,39 +2158,41 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
 
+        // TODO: use the inputs values
+        //  PlainTensor sum;
+        //  PlainTensor mask;
+        size_t xt_stride = 16;
+        // The original block_size of the sparse attention mask;
+        size_t xt_block_size = 128;
+        // auto xt_block_size = 32;
+        float xt_threshold = 0.9f;
+
         // --- Create and initialize sparse_attention_mask ---
         sparse_attention_mask.clear();
-        size_t k_blocks = div_up(max_context_len, block_size);
+        // TODO: maybe use real context_len to save memory usage
+        size_t k_blocks = div_up(max_context_len, xt_block_size);
         for (size_t b = 0; b < B_seq; ++b) {
             auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
-            size_t q_blocks = div_up(static_cast<size_t>(q_len_for_batch), block_size);
+            size_t q_blocks = div_up(static_cast<size_t>(q_len_for_batch), xt_block_size);
             PlainTensor mask;
             mask.resize<bool>({H, q_blocks, k_blocks});
             // Default initialize all to false
             std::memset(mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
-            // Optional: activate all (example)
-            for (size_t h = 0; h < H; ++h) {
-                for (size_t q_blk = 0; q_blk < q_blocks; ++q_blk) {
-                    for (size_t k_blk = 0; k_blk < k_blocks; ++k_blk) {
-                        // At the symmetric point (q_blocks/2, k_blocks/2), set the upper-left and lower-right blocks
-                        // to true, others to false bool left_top = (q_blk < q_blocks / 2) && (k_blk < k_blocks / 2);
-                        // bool right_bottom = (q_blk >= (q_blocks + 1) / 2) && (k_blk >= (k_blocks + 1) / 2);
-                        // mask.ptr<bool>(h, q_blk, k_blk)[0] = left_top || right_bottom;
-
-                        // All masks are set to true
-                        mask.ptr<bool>(h, q_blk, k_blk)[0] = true;
-
-                        // Set the middle block to false
-                        // if (q_blk == q_blocks / 2 && k_blk == k_blocks / 2) {
-                        //     mask.ptr<bool>(h, q_blk, k_blk)[0] = false;
-                        // } else {
-                        //     mask.ptr<bool>(h, q_blk, k_blk)[0] = true;
-                        // }
-                    }
-                }
-            }
             sparse_attention_mask.push_back(std::move(mask));
         }
+
+        // TODO: Avoid temporary vector and assignment here. Consider changing get_sparse_blocks
+        //       to take `std::vector<PlainTensor>& sparse_attention_mask` and fill it in-place
+        //       to reduce PlainTensor copies (memcpy of metadata) and allocations.
+        sparse_attention_mask = get_sparse_blocks(q,
+                                                  k,
+                                                  past_lens,
+                                                  subsequence_begins,
+                                                  block_indices,
+                                                  block_indices_begins,
+                                                  xt_stride,
+                                                  xt_block_size,
+                                                  xt_threshold);
 
         // --- Broadcast sparse_attention_mask to support different block sizes ---
         // The input mask may be [h, q_blocks_orig, k_blocks_orig], and needs to be broadcast to [h, q_blocks, k_blocks]
@@ -2233,20 +2234,19 @@ struct AttentionExecutor : public PagedAttentionExecutor {
             };
         // The original block_size of the sparse attention mask; can be specified later via the Page Attention Node
         // parameter const size_t sparse_attention_BlockSize = 128;
-        const size_t sparse_attention_BlockSize = 32;
         // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
         // multiple
-        if (block_size != sparse_attention_BlockSize) {
-            if (block_size > sparse_attention_BlockSize) {
-                OPENVINO_THROW("not supported: block_size > sparse_attention_BlockSize");
+        if (block_size != xt_block_size) {
+            if (block_size > xt_block_size) {
+                OPENVINO_THROW("not supported: block_size > xt_block_size");
             }
-            if (sparse_attention_BlockSize % block_size != 0) {
-                OPENVINO_THROW("not supported: sparse_attention_BlockSize ",
-                               sparse_attention_BlockSize,
+            if (xt_block_size % block_size != 0) {
+                OPENVINO_THROW("not supported: xt_block_size ",
+                               xt_block_size,
                                " is not an integer multiple of block_size ",
                                block_size);
             }
-            broadcast_sparse_attention_mask(sparse_attention_mask, sparse_attention_BlockSize, block_size);
+            broadcast_sparse_attention_mask(sparse_attention_mask, xt_block_size, block_size);
         }
 
         _helper.init(H,
@@ -2314,6 +2314,27 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         }
     }
 
+    std::vector<PlainTensor> get_sparse_blocks(PlainTensor& q,
+                                               PlainTensor& k,
+                                               PlainTensor& past_lens,
+                                               PlainTensor& subsequence_begins,
+                                               PlainTensor& block_indices,
+                                               PlainTensor& block_indices_begins,
+                                               size_t x_attention_stride,
+                                               size_t x_attention_block_size,
+                                               float threshold) {
+        size_t num_seqs = past_lens.size(0);
+        std::vector<PlainTensor> masks(num_seqs);
+
+        // TODO: support multiple batches
+        for (size_t seq_idx = 0; seq_idx < 1; seq_idx++) {
+            if (q.size(0) > 1) {
+                masks[seq_idx] = xattn_estimate(q, k, x_attention_block_size, x_attention_stride, 1, threshold, true);
+            }
+        }
+        return masks;
+    }
+
     void execute(const std::vector<MemoryPtr>& inputs, const std::vector<MemoryPtr> outputs) override {
         PlainTensor q;
         PlainTensor k;
@@ -2370,16 +2391,6 @@ struct AttentionExecutor : public PagedAttentionExecutor {
              output_emb,
              output_score,
              sparse_attention_mask);
-
-        PlainTensor sum;
-        PlainTensor mask;
-        auto stride = 16;
-        auto block_size = 128;
-        auto threshold = 0.9f;
-
-        if (q.size(0) > 1) {
-            mask = xattn_estimate(q, k, block_size, stride, 1, threshold, true);
-        }
 
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
