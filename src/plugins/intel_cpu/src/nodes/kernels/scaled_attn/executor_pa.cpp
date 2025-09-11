@@ -889,17 +889,22 @@ struct MHAHelper {
                 }
             }
 
-            // sparse attention mask: set score to -inf for (q_blk, k_blk) where
+            // Instead of writing -inf directly into scores, build a softmax mask (0/-inf) and pass it to the kernel
+            DATA_TYPE* softmax_mask = nullptr;
+            std::vector<DATA_TYPE> softmax_mask_storage;
             if (!sparse_attention_mask.empty()) {
-                float* score_base = _weight.ptr<float>(ithr, h - hq_beg, 0);
-                for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
-                    if (!sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
-                        for (size_t m = 0; m < q_cnt; m++) {
-                            float* score_blk = score_base + m * cur_kv_len_blocks * _block_size + k_blk * _block_size;
-                            std::fill(score_blk, score_blk + _block_size, -std::numeric_limits<float>::infinity());
-                        }
+                const size_t padded_len = rnd_up(cur_kv_len, _block_size);
+                softmax_mask_storage.resize(padded_len);
+                //  Initialize to -inf by default; then set positions for allowed blocks to 0
+                const DATA_TYPE neg_inf_val = static_cast<DATA_TYPE>(-std::numeric_limits<float>::infinity());
+                std::fill(softmax_mask_storage.begin(), softmax_mask_storage.end(), neg_inf_val);
+                for (size_t k = 0; k < cur_kv_len; ++k) {
+                    size_t k_blk = k / _block_size;
+                    if (sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
+                        softmax_mask_storage[k] = static_cast<DATA_TYPE>(0);
                     }
                 }
+                softmax_mask = softmax_mask_storage.data();
             }
 
             for (size_t m = q_start; m < q_end; m++) {
@@ -923,7 +928,7 @@ struct MHAHelper {
                                                reinterpret_cast<DATA_TYPE*>(score) + start_idx,
                                                revised_d_scale,
                                                alibi_lookup,
-                                               nullptr,
+                                               reinterpret_cast<void*>(softmax_mask + start_idx),
                                                nullptr,
                                                false,
                                                new_causal,
@@ -944,7 +949,7 @@ struct MHAHelper {
                                                reinterpret_cast<DATA_TYPE*>(score),
                                                revised_d_scale,
                                                alibi_lookup,
-                                               nullptr,
+                                               reinterpret_cast<void*>(softmax_mask),
                                                nullptr,
                                                false,
                                                ncausal,
@@ -1856,7 +1861,7 @@ struct MHA {
                     score_info_ptr,
                     batch_in_seq,
                     sparse_attention_mask);
-            #    endif
+#    endif
             }
         });
         if (output_score) {
@@ -2158,95 +2163,80 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
 
-        // TODO: use the inputs values
-        //  PlainTensor sum;
-        //  PlainTensor mask;
         size_t xt_stride = 16;
         // The original block_size of the sparse attention mask;
         size_t xt_block_size = 128;
         // auto xt_block_size = 32;
-        float xt_threshold = 0.9f;
+        float xt_threshold = 0.6f;
+        // float xt_threshold = 1.0f;
 
-        // --- Create and initialize sparse_attention_mask ---
-        sparse_attention_mask.clear();
-        // TODO: maybe use real context_len to save memory usage
-        size_t k_blocks = div_up(max_context_len, xt_block_size);
-        for (size_t b = 0; b < B_seq; ++b) {
-            auto q_len_for_batch = subsequence_begins.ptr<int32_t>()[b + 1] - subsequence_begins.ptr<int32_t>()[b];
-            size_t q_blocks = div_up(static_cast<size_t>(q_len_for_batch), xt_block_size);
-            PlainTensor mask;
-            mask.resize<bool>({H, q_blocks, k_blocks});
-            // Default initialize all to false
-            std::memset(mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
-            sparse_attention_mask.push_back(std::move(mask));
-        }
+        // If to support second token sparse attention, need generate sparse mask after concat_pastkv
+        if (q.size(0) > 1) {
+            sparse_attention_mask = get_sparse_blocks(q,
+                                                      k,
+                                                      past_lens,
+                                                      subsequence_begins,
+                                                      block_indices,
+                                                      block_indices_begins,
+                                                      xt_stride,
+                                                      xt_block_size,
+                                                      xt_threshold);
 
-        // TODO: Avoid temporary vector and assignment here. Consider changing get_sparse_blocks
-        //       to take `std::vector<PlainTensor>& sparse_attention_mask` and fill it in-place
-        //       to reduce PlainTensor copies (memcpy of metadata) and allocations.
-        sparse_attention_mask = get_sparse_blocks(q,
-                                                  k,
-                                                  past_lens,
-                                                  subsequence_begins,
-                                                  block_indices,
-                                                  block_indices_begins,
-                                                  xt_stride,
-                                                  xt_block_size,
-                                                  xt_threshold);
-
-        // --- Broadcast sparse_attention_mask to support different block sizes ---
-        // The input mask may be [h, q_blocks_orig, k_blocks_orig], and needs to be broadcast to [h, q_blocks, k_blocks]
-        auto broadcast_sparse_attention_mask =
-            [](std::vector<PlainTensor>& mask_vec, size_t src_block_size, size_t dst_block_size) {
-                if (src_block_size == dst_block_size)
-                    return;
-                if (src_block_size % dst_block_size != 0) {
-                    OPENVINO_THROW("not supported: sparse_attention_BlockSize=",
-                                   src_block_size,
-                                   " is not an integer multiple of block_size=",
-                                   dst_block_size);
-                }
-                size_t scale = src_block_size / dst_block_size;
-                for (auto& mask : mask_vec) {
-                    auto shape = mask.shape();
-                    size_t H = shape[0];
-                    size_t q_blocks_orig = shape[1];
-                    size_t k_blocks_orig = shape[2];
-                    size_t q_blocks = q_blocks_orig * scale;
-                    size_t k_blocks = k_blocks_orig * scale;
-                    PlainTensor new_mask;
-                    new_mask.resize<bool>({H, q_blocks, k_blocks});
-                    std::memset(new_mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
-                    for (size_t h = 0; h < H; ++h) {
-                        for (size_t q_blk = 0; q_blk < q_blocks_orig; ++q_blk) {
-                            for (size_t k_blk = 0; k_blk < k_blocks_orig; ++k_blk) {
-                                bool val = mask.ptr<bool>(h, q_blk, k_blk)[0];
-                                for (size_t dq = 0; dq < scale; ++dq) {
-                                    for (size_t dk = 0; dk < scale; ++dk) {
-                                        new_mask.ptr<bool>(h, q_blk * scale + dq, k_blk * scale + dk)[0] = val;
+            // --- Broadcast sparse_attention_mask to support different block sizes ---
+            // The input mask may be [h, q_blocks_orig, k_blocks_orig], and needs to be broadcast to [h, q_blocks,
+            // k_blocks]
+            auto broadcast_sparse_attention_mask =
+                [](std::vector<PlainTensor>& mask_vec, size_t src_block_size, size_t dst_block_size) {
+                    if (src_block_size == dst_block_size)
+                        return;
+                    if (src_block_size % dst_block_size != 0) {
+                        OPENVINO_THROW("not supported: sparse_attention_BlockSize=",
+                                       src_block_size,
+                                       " is not an integer multiple of block_size=",
+                                       dst_block_size);
+                    }
+                    size_t scale = src_block_size / dst_block_size;
+                    for (auto& mask : mask_vec) {
+                        auto shape = mask.shape();
+                        size_t H = shape[0];
+                        size_t q_blocks_orig = shape[1];
+                        size_t k_blocks_orig = shape[2];
+                        size_t q_blocks = q_blocks_orig * scale;
+                        size_t k_blocks = k_blocks_orig * scale;
+                        PlainTensor new_mask;
+                        new_mask.resize<bool>({H, q_blocks, k_blocks});
+                        std::memset(new_mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
+                        for (size_t h = 0; h < H; ++h) {
+                            for (size_t q_blk = 0; q_blk < q_blocks_orig; ++q_blk) {
+                                for (size_t k_blk = 0; k_blk < k_blocks_orig; ++k_blk) {
+                                    bool val = mask.ptr<bool>(h, q_blk, k_blk)[0];
+                                    for (size_t dq = 0; dq < scale; ++dq) {
+                                        for (size_t dk = 0; dk < scale; ++dk) {
+                                            new_mask.ptr<bool>(h, q_blk * scale + dq, k_blk * scale + dk)[0] = val;
+                                        }
                                     }
                                 }
                             }
                         }
+                        mask = std::move(new_mask);
                     }
-                    mask = std::move(new_mask);
+                };
+            // The original block_size of the sparse attention mask; can be specified later via the Page Attention Node
+            // parameter const size_t sparse_attention_BlockSize = 128;
+            // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
+            // multiple
+            if (block_size != xt_block_size) {
+                if (block_size > xt_block_size) {
+                    OPENVINO_THROW("not supported: block_size > xt_block_size");
                 }
-            };
-        // The original block_size of the sparse attention mask; can be specified later via the Page Attention Node
-        // parameter const size_t sparse_attention_BlockSize = 128;
-        // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
-        // multiple
-        if (block_size != xt_block_size) {
-            if (block_size > xt_block_size) {
-                OPENVINO_THROW("not supported: block_size > xt_block_size");
+                if (xt_block_size % block_size != 0) {
+                    OPENVINO_THROW("not supported: xt_block_size ",
+                                   xt_block_size,
+                                   " is not an integer multiple of block_size ",
+                                   block_size);
+                }
+                broadcast_sparse_attention_mask(sparse_attention_mask, xt_block_size, block_size);
             }
-            if (xt_block_size % block_size != 0) {
-                OPENVINO_THROW("not supported: xt_block_size ",
-                               xt_block_size,
-                               " is not an integer multiple of block_size ",
-                               block_size);
-            }
-            broadcast_sparse_attention_mask(sparse_attention_mask, xt_block_size, block_size);
         }
 
         _helper.init(H,
