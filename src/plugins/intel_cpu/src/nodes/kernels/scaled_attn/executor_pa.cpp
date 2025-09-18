@@ -584,6 +584,8 @@ struct MHAHelper {
     std::vector<ScoreAggregationInfo> _score_infos;
 
     PlainTensor _block_rotation_coefficient_scratch;
+    // Block size used when generating sparse_attention_mask (0 means unspecified/equal to _block_size)
+    size_t _sparse_mask_block_size = 0;
 
     MHAHelper() {
         _weight.resize<float>({size_t{1}, size_t{1}, size_t{1}, size_t{1}});
@@ -853,12 +855,25 @@ struct MHAHelper {
             // 1 1 0 0 ...
             // 1 1 1 0 ...
             // just computing the positions of 1 should be enough
+            // map runtime (block_size) indices to mask (xt_block_size) indices
+            auto map_to_mask_idx = [&](size_t q_blk_rt, size_t k_blk_rt) {
+                if (_sparse_mask_block_size == 0 || _sparse_mask_block_size == _block_size) {
+                    return std::pair<size_t, size_t>{q_blk_rt, k_blk_rt};
+                }
+                // Only support mask block >= runtime block and divisible (checked in init)
+                size_t scale = _sparse_mask_block_size / _block_size;  // >=1
+                size_t q_mask = q_blk_rt / scale;
+                size_t k_mask = k_blk_rt / scale;
+                return std::pair<size_t, size_t>{q_mask, k_mask};
+            };
             for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
                 // sparse attention mask filtering
-                if (!sparse_attention_mask.empty() &&
-                    !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
-                    // Skip GEMM for this block if mask is false
-                    continue;
+                if (!sparse_attention_mask.empty()) {
+                    auto [q_m, k_m] = map_to_mask_idx(q_blk, k_blk);
+                    if (!sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_m, k_m)[0]) {
+                        // Skip GEMM for this block if mask is false
+                        continue;
+                    }
                 }
                 if (_params.is_sage_attn) {
 #    if defined(OPENVINO_ARCH_X86_64)
@@ -900,7 +915,8 @@ struct MHAHelper {
                 std::fill(softmax_mask_storage.begin(), softmax_mask_storage.end(), neg_inf_val);
                 for (size_t k = 0; k < cur_kv_len; ++k) {
                     size_t k_blk = k / _block_size;
-                    if (sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, k_blk)[0]) {
+                    auto [q_m, k_m] = map_to_mask_idx(q_blk, k_blk);
+                    if (sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_m, k_m)[0]) {
                         softmax_mask_storage[k] = static_cast<DATA_TYPE>(0);
                     }
                 }
@@ -980,9 +996,11 @@ struct MHAHelper {
             // for each weight block, loop through all value block
             for (size_t v_blk = 0; v_blk < cur_kv_len_blocks; v_blk++) {
                 // sparse attention mask filtering for value blocks
-                if (!sparse_attention_mask.empty() &&
-                    !sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk, v_blk)[0]) {
-                    continue;
+                if (!sparse_attention_mask.empty()) {
+                    auto [q_m, v_m] = map_to_mask_idx(q_blk, v_blk);
+                    if (!sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_m, v_m)[0]) {
+                        continue;
+                    }
                 }
                 DATA_TYPE* v_ptr = nullptr;
                 if (q_is_xf16 || !q_cache_is_same) {
@@ -2182,47 +2200,6 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                                                       xt_block_size,
                                                       xt_threshold);
 
-            // --- Broadcast sparse_attention_mask to support different block sizes ---
-            // The input mask may be [h, q_blocks_orig, k_blocks_orig], and needs to be broadcast to [h, q_blocks,
-            // k_blocks]
-            auto broadcast_sparse_attention_mask =
-                [](std::vector<PlainTensor>& mask_vec, size_t src_block_size, size_t dst_block_size) {
-                    if (src_block_size == dst_block_size)
-                        return;
-                    if (src_block_size % dst_block_size != 0) {
-                        OPENVINO_THROW("not supported: sparse_attention_BlockSize=",
-                                       src_block_size,
-                                       " is not an integer multiple of block_size=",
-                                       dst_block_size);
-                    }
-                    size_t scale = src_block_size / dst_block_size;
-                    for (auto& mask : mask_vec) {
-                        auto shape = mask.shape();
-                        size_t H = shape[0];
-                        size_t q_blocks_orig = shape[1];
-                        size_t k_blocks_orig = shape[2];
-                        size_t q_blocks = q_blocks_orig * scale;
-                        size_t k_blocks = k_blocks_orig * scale;
-                        PlainTensor new_mask;
-                        new_mask.resize<bool>({H, q_blocks, k_blocks});
-                        std::memset(new_mask.ptr<bool>(), 0, H * q_blocks * k_blocks * sizeof(bool));
-                        for (size_t h = 0; h < H; ++h) {
-                            for (size_t q_blk = 0; q_blk < q_blocks_orig; ++q_blk) {
-                                for (size_t k_blk = 0; k_blk < k_blocks_orig; ++k_blk) {
-                                    bool val = mask.ptr<bool>(h, q_blk, k_blk)[0];
-                                    for (size_t dq = 0; dq < scale; ++dq) {
-                                        for (size_t dk = 0; dk < scale; ++dk) {
-                                            new_mask.ptr<bool>(h, q_blk * scale + dq, k_blk * scale + dk)[0] = val;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        mask = std::move(new_mask);
-                    }
-                };
-            // The original block_size of the sparse attention mask; can be specified later via the Page Attention Node
-            // parameter const size_t sparse_attention_BlockSize = 128;
             // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
             // multiple
             if (block_size != xt_block_size) {
@@ -2235,8 +2212,9 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                                    " is not an integer multiple of block_size ",
                                    block_size);
                 }
-                broadcast_sparse_attention_mask(sparse_attention_mask, xt_block_size, block_size);
             }
+            // keep original mask granularity; remember its block size for on-the-fly mapping
+            _helper._sparse_mask_block_size = xt_block_size;
         }
 
         _helper.init(H,
