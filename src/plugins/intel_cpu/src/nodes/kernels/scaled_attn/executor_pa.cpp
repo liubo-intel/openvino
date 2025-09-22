@@ -2181,40 +2181,39 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         // TODO: enable block_size to be multiple of 32
         OPENVINO_ASSERT(block_size == 32, "CPU: block size must be 32, current: ", block_size);
 
-        size_t xt_stride = 16;
+        xattention_threshold.resize<float>({1});
+        xattention_threshold.ptr<float>()[0] = 0.6f;
+        xattention_stride = 16;
         // The original block_size of the sparse attention mask;
-        size_t xt_block_size = 128;
-        // auto xt_block_size = 32;
-        float xt_threshold = 0.6f;
-        // float xt_threshold = 1.0f;
+        xattention_block_size = 128;
 
         // If to support second token sparse attention, need generate sparse mask after concat_pastkv
-        if (q.size(0) > 1) {
+        if (xattention_threshold && q.size(0) > 1) {
             sparse_attention_mask = get_sparse_blocks(q,
                                                       k,
                                                       past_lens,
                                                       subsequence_begins,
                                                       block_indices,
                                                       block_indices_begins,
-                                                      xt_stride,
-                                                      xt_block_size,
-                                                      xt_threshold);
+                                                      xattention_stride,
+                                                      xattention_block_size,
+                                                      xattention_threshold);
 
             // Only support block_size <= sparse_attention_BlockSize and sparse_attention_BlockSize must be an integer
             // multiple
-            if (block_size != xt_block_size) {
-                if (block_size > xt_block_size) {
-                    OPENVINO_THROW("not supported: block_size > xt_block_size");
+            if (block_size != xattention_block_size) {
+                if (block_size > xattention_block_size) {
+                    OPENVINO_THROW("not supported: block_size > xattention_block_size");
                 }
-                if (xt_block_size % block_size != 0) {
-                    OPENVINO_THROW("not supported: xt_block_size ",
-                                   xt_block_size,
+                if (xattention_block_size % block_size != 0) {
+                    OPENVINO_THROW("not supported: xattention_block_size ",
+                                   xattention_block_size,
                                    " is not an integer multiple of block_size ",
                                    block_size);
                 }
             }
             // keep original mask granularity; remember its block size for on-the-fly mapping
-            _helper._sparse_mask_block_size = xt_block_size;
+            _helper._sparse_mask_block_size = xattention_block_size;
         }
 
         _helper.init(H,
@@ -2290,14 +2289,20 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                                                PlainTensor& block_indices_begins,
                                                size_t x_attention_stride,
                                                size_t x_attention_block_size,
-                                               float threshold) {
+                                               PlainTensor& threshold) {
         size_t num_seqs = past_lens.size(0);
         std::vector<PlainTensor> masks(num_seqs);
 
         // TODO: support multiple batches
         for (size_t seq_idx = 0; seq_idx < 1; seq_idx++) {
             if (q.size(0) > 1) {
-                masks[seq_idx] = xattn_estimate(q, k, x_attention_block_size, x_attention_stride, 1, threshold, true);
+                masks[seq_idx] = xattn_estimate(q,
+                                                k,
+                                                x_attention_block_size,
+                                                x_attention_stride,
+                                                1,
+                                                threshold.ptr<float>()[seq_idx],
+                                                true);
             }
         }
         return masks;
