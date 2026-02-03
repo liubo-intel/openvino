@@ -131,6 +131,7 @@ enum class Type : uint8_t {
     ScaledDotProductAttention,
     PagedAttention,
     RoPE,
+    CausalConv1D,
     CausalMaskPreprocess,
     LLMMLP,
     QKVProjection,

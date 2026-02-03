@@ -9,6 +9,7 @@
 #include "nodes/bin_conv.h"
 #include "nodes/broadcast.h"
 #include "nodes/bucketize.h"
+#include "nodes/causal_conv1d.h"
 #include "nodes/causal_mask_preprocess.h"
 #include "nodes/col2im.h"
 #include "nodes/color_convert.h"
@@ -216,6 +217,7 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(Unique, Type::Unique);
     INTEL_CPU_NODE(Ngram, Type::Ngram);
     INTEL_CPU_NODE(RoPE, Type::RoPE);
+    INTEL_CPU_NODE(CausalConv1D, Type::CausalConv1D);
     INTEL_CPU_NODE(CausalMaskPreprocess, Type::CausalMaskPreprocess);
     INTEL_CPU_NODE(Identity, Type::Identity);
     INTEL_CPU_NODE(Interpolate, Type::Interpolate);
