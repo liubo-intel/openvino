@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -17,9 +18,15 @@
 #include "node.h"
 #include "nodes/reference.h"
 #include "openvino/core/except.hpp"
+#include "openvino/core/parallel.hpp"
 #include "ov_ops/causal_conv1d.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/plain_tensor.hpp"
+
+#if defined(OPENVINO_ARCH_X86) || defined(OPENVINO_ARCH_X86_64)
+#    include "cpu/x64/cpu_isa_traits.hpp"
+#    include "cpu/x64/jit_generator.hpp"
+#endif
 
 namespace ov::intel_cpu::node {
 
@@ -73,6 +80,109 @@ static size_t get_weight_k(const ov::intel_cpu::PlainTensor& t_weight) {
     }
     return 0;
 }
+
+#if defined(OPENVINO_ARCH_X86_64)
+namespace {
+
+using namespace dnnl::impl;
+using namespace dnnl::impl::cpu::x64;
+using namespace dnnl::impl::utils;
+using namespace Xbyak;
+using namespace Xbyak::util;
+
+struct jit_dot_call_args {
+    const float* src;
+    const float* weights;
+    size_t len;
+    float* dst;
+};
+
+#    define GET_OFF(field) offsetof(jit_dot_call_args, field)
+
+template <cpu_isa_t isa>
+struct jit_dot_kernel : public jit_generator_t {
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_dot_kernel)
+
+    static constexpr size_t vec_size = cpu_isa_traits_t<isa>::vlen / sizeof(float);
+
+    jit_dot_kernel() : jit_generator_t(jit_name()) {}
+
+    void create_ker() {
+        jit_generator_t::create_kernel();
+        ker_ = reinterpret_cast<ker_t>(jit_ker());
+    }
+
+    void operator()(const jit_dot_call_args* args) const {
+        ker_(args);
+    }
+
+private:
+    using Vmm = typename dnnl::impl::utils::
+        conditional3<isa == cpu::x64::sse41, Xbyak::Xmm, isa == cpu::x64::avx2, Xbyak::Ymm, Xbyak::Zmm>::type;
+
+    void generate() override {
+        this->preamble();
+
+        mov(reg_src, ptr[abi_param1 + GET_OFF(src)]);
+        mov(reg_wei, ptr[abi_param1 + GET_OFF(weights)]);
+        mov(reg_len, ptr[abi_param1 + GET_OFF(len)]);
+        mov(reg_dst, ptr[abi_param1 + GET_OFF(dst)]);
+
+        mov(reg_iter, reg_len);
+        if (vec_size == 16) {
+            shr(reg_iter, 4);
+        } else if (vec_size == 8) {
+            shr(reg_iter, 3);
+        }
+
+        uni_vpxor(vmm_acc, vmm_acc, vmm_acc);
+
+        Xbyak::Label loop, exit;
+        L(loop);
+        cmp(reg_iter, 0);
+        je(exit, T_NEAR);
+        uni_vmovups(vmm_src, ptr[reg_src]);
+        uni_vmovups(vmm_wei, ptr[reg_wei]);
+        vfmadd231ps(vmm_acc, vmm_src, vmm_wei);
+        add(reg_src, vec_size * sizeof(float));
+        add(reg_wei, vec_size * sizeof(float));
+        dec(reg_iter);
+        jmp(loop);
+        L(exit);
+
+        uni_vmovups(ptr[reg_dst], vmm_acc);
+
+        this->postamble();
+    }
+
+    using ker_t = void (*)(const jit_dot_call_args*);
+    ker_t ker_ = nullptr;
+
+    const Xbyak::Reg64 reg_src = r8;
+    const Xbyak::Reg64 reg_wei = r9;
+    const Xbyak::Reg64 reg_len = r10;
+    const Xbyak::Reg64 reg_dst = r11;
+    const Xbyak::Reg64 reg_iter = r12;
+
+    const Vmm vmm_acc = Vmm(0);
+    const Vmm vmm_src = Vmm(1);
+    const Vmm vmm_wei = Vmm(2);
+};
+
+#    undef GET_OFF
+
+template <cpu_isa_t isa>
+static std::shared_ptr<jit_dot_kernel<isa>> get_dot_kernel() {
+    static std::shared_ptr<jit_dot_kernel<isa>> ker;
+    if (!ker) {
+        ker = std::make_shared<jit_dot_kernel<isa>>();
+        ker->create_ker();
+    }
+    return ker;
+}
+
+}  // namespace
+#endif
 
 static void causal_conv1d_reference_impl(const PlainTensor& t_cache,
                                          const PlainTensor& t_hidden,
@@ -153,7 +263,173 @@ static void causal_conv1d_reference_impl(const PlainTensor& t_cache,
                                                           const PlainTensor& t_pos,
                                                           PlainTensor& t_out,
                                                           PlainTensor& t_state) {
-    OPENVINO_THROW_NOT_IMPLEMENTED("CausalConv1D: optimized implementation is not available yet");
+#if !defined(OPENVINO_ARCH_X86_64)
+    causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+    return;
+#else
+    using namespace dnnl::impl::cpu::x64;
+
+    std::shared_ptr<jit_dot_kernel<cpu::x64::avx512_core>> ker_avx512;
+    std::shared_ptr<jit_dot_kernel<cpu::x64::avx2>> ker_avx2;
+    size_t vec_size = 0;
+
+    if (mayiuse(cpu::x64::avx512_core)) {
+        ker_avx512 = get_dot_kernel<cpu::x64::avx512_core>();
+        vec_size = jit_dot_kernel<cpu::x64::avx512_core>::vec_size;
+    } else if (mayiuse(cpu::x64::avx2)) {
+        ker_avx2 = get_dot_kernel<cpu::x64::avx2>();
+        vec_size = jit_dot_kernel<cpu::x64::avx2>::vec_size;
+    } else {
+        causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+        return;
+    }
+
+    auto dot_product = [&](const float* src, const float* weights, size_t len) -> float {
+        if (len == 0) {
+            return 0.0f;
+        }
+        if (vec_size == 0 || len < vec_size) {
+            float sum = 0.0f;
+            for (size_t i = 0; i < len; ++i) {
+                sum += src[i] * weights[i];
+            }
+            return sum;
+        }
+
+        const size_t len_vec = (len / vec_size) * vec_size;
+        alignas(64) float acc_buf[16] = {0.0f};
+        jit_dot_call_args args{src, weights, len_vec, acc_buf};
+        if (ker_avx512) {
+            (*ker_avx512)(&args);
+        } else {
+            (*ker_avx2)(&args);
+        }
+        float sum = 0.0f;
+        for (size_t i = 0; i < vec_size; ++i) {
+            sum += acc_buf[i];
+        }
+        for (size_t i = len_vec; i < len; ++i) {
+            sum += src[i] * weights[i];
+        }
+        return sum;
+    };
+
+    const size_t B = t_hidden.size(0);
+    const size_t C = t_hidden.size(1);
+    const size_t seq_len = t_hidden.size(2);
+    const size_t L = t_cache.size(2);
+
+    if (seq_len == 1) {
+        auto read_pos0 = [&]() -> int64_t {
+            return static_cast<int64_t>(t_pos.at<int32_t>({0}));
+        };
+        auto clamp_pos = [&](int64_t p) -> size_t {
+            if (p < 0) {
+                p = 0;
+            }
+            const int64_t max_p = static_cast<int64_t>(L) - 1;
+            if (p > max_p) {
+                p = max_p;
+            }
+            return static_cast<size_t>(p);
+        };
+        const size_t pos = clamp_pos(read_pos0());
+
+        if (pos != L - 1) {
+            causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+            return;
+        }
+
+        parallel_for(C, [&](size_t c) {
+            for (size_t b = 0; b < B; ++b) {
+                auto* state = t_state.ptr<float>(b, c, 0);
+                const auto* cache = t_cache.ptr<float>(b, c, 0);
+                if (L <= 4) {
+                    if (L > 1) {
+                        state[0] = cache[1];
+                    }
+                    if (L > 2) {
+                        state[1] = cache[2];
+                    }
+                    if (L > 3) {
+                        state[2] = cache[3];
+                    }
+                } else {
+                    std::memcpy(state, cache + 1, (L - 1) * sizeof(float));
+                }
+                state[L - 1] = *t_hidden.ptr<float>(b, c, 0);
+            }
+        });
+
+        parallel_for(C, [&](size_t c) {
+            const auto* weight = t_weight.ptr<float>(c, 0, 0, 0);
+            for (size_t b = 0; b < B; ++b) {
+                const auto* state = t_state.ptr<float>(b, c, 0);
+                *t_out.ptr<float>(b, c, 0) = dot_product(state, weight, L);
+            }
+        });
+        return;
+    }
+
+    if (seq_len < L) {
+        causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+        return;
+    }
+
+    const size_t copy_len = std::min(seq_len, L);
+    const size_t pad = L - copy_len;
+    const size_t start = (seq_len > L) ? (seq_len - L) : 0;
+
+    parallel_for(C, [&](size_t c) {
+        for (size_t b = 0; b < B; ++b) {
+            auto* state = t_state.ptr<float>(b, c, 0);
+            if (pad > 0) {
+                std::memset(state, 0, pad * sizeof(float));
+            }
+            const auto* hidden = t_hidden.ptr<float>(b, c, start);
+            if (copy_len <= 4) {
+                if (copy_len > 0) {
+                    state[pad] = hidden[0];
+                }
+                if (copy_len > 1) {
+                    state[pad + 1] = hidden[1];
+                }
+                if (copy_len > 2) {
+                    state[pad + 2] = hidden[2];
+                }
+                if (copy_len > 3) {
+                    state[pad + 3] = hidden[3];
+                }
+            } else {
+                std::memcpy(state + pad, hidden, copy_len * sizeof(float));
+            }
+        }
+    });
+
+    parallel_for(C, [&](size_t c) {
+        const auto* weight = t_weight.ptr<float>(c, 0, 0, 0);
+        for (size_t b = 0; b < B; ++b) {
+            const auto* hidden_base = t_hidden.ptr<float>(b, c, 0);
+            auto* out = t_out.ptr<float>(b, c, 0);
+
+            for (size_t t = 0; t + 1 < L; ++t) {
+                float sum = 0.0f;
+                for (size_t k = 0; k < L; ++k) {
+                    const auto idx = static_cast<int64_t>(t) - static_cast<int64_t>(L) + 1 + static_cast<int64_t>(k);
+                    if (idx >= 0) {
+                        sum += hidden_base[static_cast<size_t>(idx)] * weight[k];
+                    }
+                }
+                out[t] = sum;
+            }
+
+            for (size_t t = L - 1; t < seq_len; ++t) {
+                const auto* src = hidden_base + (t - (L - 1));
+                out[t] = dot_product(src, weight, L);
+            }
+        }
+    });
+#endif
 }
 
 void CausalConv1D::execute(const dnnl::stream& strm) {
@@ -205,7 +481,8 @@ void CausalConv1D::execute(const dnnl::stream& strm) {
                     "CausalConv1D: cache_position must be i32 in this reference implementation");
     OPENVINO_ASSERT(t_pos.m_rank != 0, "CausalConv1D: cache_position must be 1D in this reference implementation");
 
-    causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+    // causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
+    causal_conv1d_optimized_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
 }
 
 }  // namespace ov::intel_cpu::node
