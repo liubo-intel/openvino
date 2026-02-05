@@ -17,8 +17,6 @@
 #include "node.h"
 #include "nodes/reference.h"
 #include "openvino/core/except.hpp"
-#include "openvino/core/type/bfloat16.hpp"
-#include "openvino/core/type/float16.hpp"
 #include "ov_ops/causal_conv1d.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 #include "utils/plain_tensor.hpp"
@@ -76,81 +74,21 @@ static size_t get_weight_k(const ov::intel_cpu::PlainTensor& t_weight) {
     return 0;
 }
 
-template <typename T>
-void CausalConv1D::executeTyped(const std::vector<MemoryPtr>& inputs, const std::vector<MemoryPtr>& outputs) const {
-    PlainTensor t_cache(inputs[0]);
-    PlainTensor t_hidden(inputs[1]);
-    PlainTensor t_weight(inputs[2]);
-    PlainTensor t_pos(inputs[3]);
-    PlainTensor t_bias;
-    const bool has_bias = inputs.size() > 4;
-    if (has_bias) {
-        t_bias.reset(inputs[4]);
-    }
-
-    PlainTensor t_out(outputs[0]);
-    PlainTensor t_state(outputs[1]);
-
+static void causal_conv1d_reference_impl(const PlainTensor& t_cache,
+                                         const PlainTensor& t_hidden,
+                                         const PlainTensor& t_weight,
+                                         const PlainTensor& t_pos,
+                                         PlainTensor& t_out,
+                                         PlainTensor& t_state) {
     const size_t B = t_hidden.size(0);
     const size_t C = t_hidden.size(1);
     const size_t seq_len = t_hidden.size(2);
     const size_t L = t_cache.size(2);
-    const size_t K = get_weight_k(t_weight);
-
-    OPENVINO_ASSERT(K == L || K == 0, "CausalConv1D: weight K mismatch with cache length");
-
-    auto read_weight = [&](size_t c, size_t k) -> float {
-        auto read_as = [&](auto dummy) -> float {
-            using DT = decltype(dummy);
-            if (t_weight.m_rank == 4) {
-                return static_cast<float>(t_weight.at<DT>({c, 0, 0, k}));
-            }
-            if (t_weight.m_rank == 3) {
-                return static_cast<float>(t_weight.at<DT>({c, 0, k}));
-            }
-            if (t_weight.m_rank == 2) {
-                return static_cast<float>(t_weight.at<DT>({c, k}));
-            }
-            return 0.0f;
-        };
-        const auto prec = t_weight.get_precision();
-        if (prec == ov::element::f16) {
-            return read_as(ov::float16{});
-        }
-        if (prec == ov::element::bf16) {
-            return read_as(ov::bfloat16{});
-        }
-        return read_as(float{});
-    };
-
-    auto read_bias = [&](size_t c) -> float {
-        if (!has_bias) {
-            return 0.0f;
-        }
-        const auto prec = t_bias.get_precision();
-        if (prec == ov::element::f16) {
-            return static_cast<float>(t_bias.at<ov::float16>({c}));
-        }
-        if (prec == ov::element::bf16) {
-            return static_cast<float>(t_bias.at<ov::bfloat16>({c}));
-        }
-        return static_cast<float>(t_bias.at<float>({c}));
-    };
 
     if (seq_len == 1) {
         // decoding path
         auto read_pos0 = [&]() -> int64_t {
-            const auto prec = t_pos.get_precision();
-            if (t_pos.m_rank == 0) {
-                if (prec == ov::element::i32) {
-                    return static_cast<int64_t>(t_pos.at<int32_t>({}));
-                }
-                return t_pos.at<int64_t>({});
-            }
-            if (prec == ov::element::i32) {
-                return static_cast<int64_t>(t_pos.at<int32_t>({0}));
-            }
-            return t_pos.at<int64_t>({0});
+            return static_cast<int64_t>(t_pos.at<int32_t>({0}));
         };
         auto clamp_pos = [&](int64_t p) -> size_t {
             if (p < 0) {
@@ -167,16 +105,15 @@ void CausalConv1D::executeTyped(const std::vector<MemoryPtr>& inputs, const std:
             for (size_t c = 0; c < C; ++c) {
                 // roll cache by -1 and write at cache_position
                 for (size_t k = 0; k + 1 < L; ++k) {
-                    t_state.at<T>({b, c, k}) = t_cache.at<T>({b, c, k + 1});
+                    t_state.at<float>({b, c, k}) = t_cache.at<float>({b, c, k + 1});
                 }
-                t_state.at<T>({b, c, pos}) = t_hidden.at<T>({b, c, 0});
+                t_state.at<float>({b, c, pos}) = t_hidden.at<float>({b, c, 0});
 
                 float sum = 0.0f;
                 for (size_t k = 0; k < L; ++k) {
-                    sum += static_cast<float>(t_state.at<T>({b, c, k})) * read_weight(c, k);
+                    sum += t_state.at<float>({b, c, k}) * t_weight.at<float>({c, 0, 0, k});
                 }
-                sum += read_bias(c);
-                t_out.at<T>({b, c, 0}) = static_cast<T>(sum);
+                t_out.at<float>({b, c, 0}) = sum;
             }
         }
         return;
@@ -189,28 +126,34 @@ void CausalConv1D::executeTyped(const std::vector<MemoryPtr>& inputs, const std:
     for (size_t b = 0; b < B; ++b) {
         for (size_t c = 0; c < C; ++c) {
             for (size_t k = 0; k < pad; ++k) {
-                t_state.at<T>({b, c, k}) = static_cast<T>(0);
+                t_state.at<float>({b, c, k}) = 0.0f;
             }
             for (size_t t = 0; t < copy_len; ++t) {
-                t_state.at<T>({b, c, pad + t}) = t_hidden.at<T>({b, c, start + t});
+                t_state.at<float>({b, c, pad + t}) = t_hidden.at<float>({b, c, start + t});
             }
 
             for (size_t t = 0; t < seq_len; ++t) {
                 float sum = 0.0f;
                 for (size_t k = 0; k < L; ++k) {
                     // Conv1d uses cross-correlation: idx = t + k - (L - 1)，represent left padding conv
-                    const auto idx = static_cast<int64_t>(t) - static_cast<int64_t>(L) + 1 +
-                                     static_cast<int64_t>(k);
+                    const auto idx = static_cast<int64_t>(t) - static_cast<int64_t>(L) + 1 + static_cast<int64_t>(k);
                     if (idx >= 0) {
-                        sum += static_cast<float>(t_hidden.at<T>({b, c, static_cast<size_t>(idx)})) *
-                               read_weight(c, k);
+                        sum += t_hidden.at<float>({b, c, static_cast<size_t>(idx)}) * t_weight.at<float>({c, 0, 0, k});
                     }
                 }
-                sum += read_bias(c);
-                t_out.at<T>({b, c, t}) = static_cast<T>(sum);
+                t_out.at<float>({b, c, t}) = sum;
             }
         }
     }
+}
+
+[[maybe_unused]] static void causal_conv1d_optimized_impl(const PlainTensor& t_cache,
+                                                          const PlainTensor& t_hidden,
+                                                          const PlainTensor& t_weight,
+                                                          const PlainTensor& t_pos,
+                                                          PlainTensor& t_out,
+                                                          PlainTensor& t_state) {
+    OPENVINO_THROW_NOT_IMPLEMENTED("CausalConv1D: optimized implementation is not available yet");
 }
 
 void CausalConv1D::execute(const dnnl::stream& strm) {
@@ -224,13 +167,45 @@ void CausalConv1D::execute(const dnnl::stream& strm) {
     }
 
     const auto precision = getOriginalInputPrecisionAtPort(1);
-    if (precision == ov::element::f16) {
-        executeTyped<ov::float16>(inputs, outputs);
-    } else if (precision == ov::element::bf16) {
-        executeTyped<ov::bfloat16>(inputs, outputs);
-    } else {
-        executeTyped<float>(inputs, outputs);
-    }
+    OPENVINO_ASSERT(precision == ov::element::f32,
+                    "CausalConv1D: only f32 is supported in this reference implementation");
+
+    const bool has_bias = inputs.size() > 4;
+    OPENVINO_ASSERT(!has_bias, "CausalConv1D: bias is not supported in this reference implementation");
+
+    PlainTensor t_cache(inputs[0]);
+    PlainTensor t_hidden(inputs[1]);
+    PlainTensor t_weight(inputs[2]);
+    PlainTensor t_pos(inputs[3]);
+
+    PlainTensor t_out(outputs[0]);
+    PlainTensor t_state(outputs[1]);
+
+    const size_t L = t_cache.size(2);
+    const size_t K = get_weight_k(t_weight);
+
+    OPENVINO_ASSERT(K == L || K == 0, "CausalConv1D: weight K mismatch with cache length");
+
+    const auto weight_prec = t_weight.get_precision();
+    OPENVINO_ASSERT(weight_prec == ov::element::f32,
+                    "CausalConv1D: only f32 weight is supported in this reference implementation");
+    OPENVINO_ASSERT(t_weight.m_rank == 4, "CausalConv1D: only 4D weight is supported in this reference implementation");
+
+    OPENVINO_ASSERT(t_cache.get_precision() == ov::element::f32,
+                    "CausalConv1D: cache must be f32 in this reference implementation");
+    OPENVINO_ASSERT(t_hidden.get_precision() == ov::element::f32,
+                    "CausalConv1D: hidden_states must be f32 in this reference implementation");
+    OPENVINO_ASSERT(t_out.get_precision() == ov::element::f32,
+                    "CausalConv1D: output must be f32 in this reference implementation");
+    OPENVINO_ASSERT(t_state.get_precision() == ov::element::f32,
+                    "CausalConv1D: state must be f32 in this reference implementation");
+
+    const auto pos_prec = t_pos.get_precision();
+    OPENVINO_ASSERT(pos_prec == ov::element::i32,
+                    "CausalConv1D: cache_position must be i32 in this reference implementation");
+    OPENVINO_ASSERT(t_pos.m_rank != 0, "CausalConv1D: cache_position must be 1D in this reference implementation");
+
+    causal_conv1d_reference_impl(t_cache, t_hidden, t_weight, t_pos, t_out, t_state);
 }
 
 }  // namespace ov::intel_cpu::node
