@@ -19,8 +19,8 @@ bool CausalConv1D::visit_attributes(AttributeVisitor& visitor) {
 }
 
 void CausalConv1D::validate_and_infer_types() {
-    OPENVINO_ASSERT(get_input_size() == 4 || get_input_size() == 5,
-                    "CausalConv1D expects 4 or 5 inputs, got ",
+    OPENVINO_ASSERT(get_input_size() >= 4 && get_input_size() <= 6,
+                    "CausalConv1D expects 4..6 inputs, got ",
                     get_input_size());
 
     const auto cache_pshape = get_input_partial_shape(0);

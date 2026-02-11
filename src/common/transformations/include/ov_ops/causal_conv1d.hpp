@@ -19,8 +19,9 @@ namespace internal {
 /// 0: cache [B, C, L]
 /// 1: hidden_states (Bx) [B, C, T]
 /// 2: weight [C, 1, 1, L] (or [C, 1, L])
-/// 3: cache_position [T] (or scalar)
+/// 3: cache_position [T] (or scalar, optional for qwen3_next)
 /// 4: bias [C] (optional)
+/// 5: activation (optional scalar, int; 0=None, 1=SiLU)
 ///
 /// Outputs:
 /// 0: conv_out [B, C, T]
@@ -28,6 +29,8 @@ namespace internal {
 class TRANSFORMATIONS_API CausalConv1D : public Op {
 public:
     OPENVINO_OP("CausalConv1D", "ie_internal_opset", Op);
+
+    enum class ActivationType : int64_t { None = 0, SiLU = 1 };
 
     CausalConv1D() = default;
 

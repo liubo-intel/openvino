@@ -8,6 +8,7 @@
 #include <queue>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include "itt.hpp"
 #include "openvino/core/rt_info.hpp"
@@ -19,11 +20,13 @@
 #include "openvino/op/convert.hpp"
 #include "openvino/op/equal.hpp"
 #include "openvino/op/group_conv.hpp"
+#include "openvino/op/loop.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/pad.hpp"
 #include "openvino/op/range.hpp"
 #include "openvino/op/reduce_sum.hpp"
 #include "openvino/op/subtract.hpp"
+#include "openvino/op/swish.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "openvino/util/common_util.hpp"
@@ -45,6 +48,22 @@ std::shared_ptr<Node> skip_broadcast(const std::shared_ptr<Node>& node) {
     return cur;
 }
 
+bool is_search_barrier(const std::shared_ptr<Node>& node) {
+    if (!node) {
+        return false;
+    }
+    if (ov::is_type<v5::Loop>(node)) {
+        return true;
+    }
+    if (ov::is_type<v6::Assign>(node)) {
+        return true;
+    }
+    if (ov::is_type<v6::ReadValue>(node) || ov::is_type<v3::ReadValue>(node)) {
+        return true;
+    }
+    return false;
+}
+
 std::shared_ptr<Node> find_read_value(const std::shared_ptr<Node>& start) {
     std::queue<std::shared_ptr<Node>> q;
     std::unordered_set<Node*> visited;
@@ -59,6 +78,9 @@ std::shared_ptr<Node> find_read_value(const std::shared_ptr<Node>& start) {
         if (ov::is_type<v6::ReadValue>(node) || ov::is_type<v3::ReadValue>(node)) {
             return node;
         }
+        if (is_search_barrier(node)) {
+            continue;
+        }
         for (size_t i = 0; i < node->get_input_size(); ++i) {
             q.push(node->input_value(i).get_node_shared_ptr());
         }
@@ -66,14 +88,98 @@ std::shared_ptr<Node> find_read_value(const std::shared_ptr<Node>& start) {
     return nullptr;
 }
 
-std::shared_ptr<Node> find_group_conv_user(const Output<Node>& output) {
-    for (const auto& target : output.get_target_inputs()) {
-        auto node = target.get_node()->shared_from_this();
-        if (ov::is_type<v1::GroupConvolution>(node)) {
-            return node;
+bool has_upstream_node(const std::shared_ptr<Node>& start, const Node* target) {
+    if (!start || !target) {
+        return false;
+    }
+    std::queue<std::shared_ptr<Node>> q;
+    std::unordered_set<Node*> visited;
+    q.push(start);
+    while (!q.empty()) {
+        auto node = q.front();
+        q.pop();
+        if (!node || visited.count(node.get())) {
+            continue;
+        }
+        if (node.get() == target) {
+            return true;
+        }
+        visited.insert(node.get());
+        for (size_t i = 0; i < node->get_input_size(); ++i) {
+            q.push(node->input_value(i).get_node_shared_ptr());
         }
     }
-    return nullptr;
+    return false;
+}
+
+std::shared_ptr<Node> find_group_conv_user(const Output<Node>& output, const std::shared_ptr<Node>& anchor) {
+    std::vector<std::shared_ptr<v1::GroupConvolution>> group_convs;
+    for (const auto& target : output.get_target_inputs()) {
+        auto node = target.get_node()->shared_from_this();
+        if (auto gc = ov::as_type_ptr<v1::GroupConvolution>(node)) {
+            group_convs.push_back(gc);
+        }
+    }
+    if (group_convs.empty()) {
+        return nullptr;
+    }
+    std::vector<std::shared_ptr<v1::GroupConvolution>> anchored;
+    if (anchor) {
+        for (const auto& gc : group_convs) {
+            if (has_upstream_node(anchor, gc.get())) {
+                anchored.push_back(gc);
+            }
+        }
+        if (!anchored.empty()) {
+            group_convs.swap(anchored);
+        }
+    }
+    auto has_conv1d_name = [](const std::shared_ptr<Node>& node) -> bool {
+        if (!node) {
+            return false;
+        }
+        if (node->get_friendly_name().find("conv1d") != std::string::npos) {
+            return true;
+        }
+        for (size_t i = 0; i < node->get_output_size(); ++i) {
+            const auto& names = node->get_output_tensor(i).get_names();
+            for (const auto& name : names) {
+                if (name.find("conv1d") != std::string::npos) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    auto has_non_zero_pads = [](const std::shared_ptr<v1::GroupConvolution>& node) -> bool {
+        if (!node) {
+            return false;
+        }
+        const auto& pads_begin = node->get_pads_begin();
+        const auto& pads_end = node->get_pads_end();
+        for (size_t i = 0; i < pads_begin.size(); ++i) {
+            if (pads_begin[i] != 0) {
+                return true;
+            }
+        }
+        for (size_t i = 0; i < pads_end.size(); ++i) {
+            if (pads_end[i] != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const auto& gc : group_convs) {
+        if (has_conv1d_name(gc)) {
+            return gc;
+        }
+    }
+    for (const auto& gc : group_convs) {
+        if (has_non_zero_pads(gc)) {
+            return gc;
+        }
+    }
+    return group_convs.front();
 }
 
 bool is_scalar_like(const Output<Node>& out) {
@@ -119,9 +225,9 @@ std::shared_ptr<Node> find_is_decoding(const std::shared_ptr<Node>& scalar_node)
         return nullptr;
     }
     const auto& eq_node = convert->input_value(0).get_node_shared_ptr();
-    const bool is_equal = ov::is_type<v1::Equal>(eq_node) ||
-                          (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(eq_node) &&
-                           eq_node->get_type_name() == std::string("Equal"));
+    const bool is_equal =
+        ov::is_type<v1::Equal>(eq_node) || (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(eq_node) &&
+                                            eq_node->get_type_name() == std::string("Equal"));
     if (!is_equal) {
         return nullptr;
     }
@@ -133,14 +239,12 @@ std::shared_ptr<Node> find_one_minus(const std::shared_ptr<Node>& is_decoding) {
         return nullptr;
     }
     auto is_subtract_like = [](const std::shared_ptr<Node>& node) -> bool {
-        return ov::is_type<v1::Subtract>(node) ||
-               (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(node) &&
-                node->get_type_name() == std::string("Subtract"));
+        return ov::is_type<v1::Subtract>(node) || (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(node) &&
+                                                   node->get_type_name() == std::string("Subtract"));
     };
     auto is_add_like = [](const std::shared_ptr<Node>& node) -> bool {
-        return ov::is_type<v1::Add>(node) ||
-               (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(node) &&
-                node->get_type_name() == std::string("Add"));
+        return ov::is_type<v1::Add>(node) || (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(node) &&
+                                              node->get_type_name() == std::string("Add"));
     };
     for (const auto& target : is_decoding->output(0).get_target_inputs()) {
         auto node = target.get_node()->shared_from_this();
@@ -205,13 +309,16 @@ std::shared_ptr<v1::Add> find_conv_out_add(const std::shared_ptr<Node>& is_decod
             if (!data0 || !data1) {
                 continue;
             }
+            if (!has_upstream_node(data0, hidden_states.get()) && !has_upstream_node(data1, hidden_states.get())) {
+                continue;
+            }
             const auto p0 = data0->get_output_partial_shape(0);
             const auto p1 = data1->get_output_partial_shape(0);
             if (p0.rank().is_dynamic() || p1.rank().is_dynamic()) {
                 return add;
             }
-            if (p0.rank().get_length() == 3 && p1.rank().get_length() == 3 &&
-                hidden_pshape.rank().is_static() && hidden_pshape.rank().get_length() == 3) {
+            if (p0.rank().get_length() == 3 && p1.rank().get_length() == 3 && hidden_pshape.rank().is_static() &&
+                hidden_pshape.rank().get_length() == 3) {
                 const auto hidden_t = hidden_pshape[2];
                 const auto p0_t = p0[2];
                 if (hidden_t.is_dynamic() || p0_t.is_dynamic() || hidden_t == p0_t) {
@@ -239,6 +346,19 @@ std::shared_ptr<Node> find_bias_from_reduce(const std::shared_ptr<Node>& reduce_
     return nullptr;
 }
 
+bool is_swish_like(const std::shared_ptr<Node>& node) {
+    if (!node) {
+        return false;
+    }
+    if (ov::is_type<v4::Swish>(node)) {
+        return true;
+    }
+    if (std::dynamic_pointer_cast<ov::op::TypeRelaxedBase>(node) && node->get_type_name() == std::string("Swish")) {
+        return true;
+    }
+    return false;
+}
+
 bool has_cache_position_name(const std::shared_ptr<Node>& node) {
     if (!node) {
         return false;
@@ -260,8 +380,6 @@ bool has_cache_position_name(const std::shared_ptr<Node>& node) {
 std::shared_ptr<Node> find_cache_position(const std::shared_ptr<Node>& start) {
     std::queue<std::shared_ptr<Node>> q;
     std::unordered_set<Node*> visited;
-    std::shared_ptr<Node> fallback_clamp = nullptr;
-    std::shared_ptr<Node> fallback_range = nullptr;
     q.push(start);
     while (!q.empty()) {
         auto node = q.front();
@@ -274,26 +392,20 @@ std::shared_ptr<Node> find_cache_position(const std::shared_ptr<Node>& start) {
             if (has_cache_position_name(node)) {
                 return node;
             }
-            if (!fallback_clamp) {
-                fallback_clamp = node;
-            }
         }
         if (ov::is_type<v4::Range>(node)) {
             if (has_cache_position_name(node)) {
                 return node;
             }
-            if (!fallback_range) {
-                fallback_range = node;
-            }
+        }
+        if (is_search_barrier(node)) {
+            continue;
         }
         for (size_t i = 0; i < node->get_input_size(); ++i) {
             q.push(node->input_value(i).get_node_shared_ptr());
         }
     }
-    if (fallback_clamp) {
-        return fallback_clamp;
-    }
-    return fallback_range;
+    return nullptr;
 }
 
 }  // namespace
@@ -376,15 +488,6 @@ ov::pass::CausalConv1DFusion::CausalConv1DFusion() {
             return false;
         }
 
-        auto group_conv = find_group_conv_user(hidden_states->output(0));
-        if (!group_conv) {
-            return false;
-        }
-        auto weight = group_conv->input_value(1).get_node_shared_ptr();
-        if (!weight) {
-            return false;
-        }
-
         // Optional bias detection (decode path)
         std::shared_ptr<Node> bias = nullptr;
         for (const auto& target : conv_state_dec->output(0).get_target_inputs()) {
@@ -412,23 +515,76 @@ ov::pass::CausalConv1DFusion::CausalConv1DFusion() {
             return false;
         }
 
-        auto cache_position = find_cache_position(conv_state_dec);
-        if (!cache_position) {
+        auto group_conv = find_group_conv_user(hidden_states->output(0), conv_out_add);
+        if (!group_conv) {
+            return false;
+        }
+        auto weight = group_conv->input_value(1).get_node_shared_ptr();
+        if (!weight) {
             return false;
         }
 
-        Output<Node> cache_position_output = cache_position->output(0);
+        bool has_silu = false;
+        {
+            auto co_mul0 = ov::as_type_ptr<v1::Multiply>(conv_out_add->input_value(0).get_node_shared_ptr());
+            auto co_mul1 = ov::as_type_ptr<v1::Multiply>(conv_out_add->input_value(1).get_node_shared_ptr());
+            if (co_mul0 && co_mul1) {
+                auto co_data0 = get_data_input(co_mul0);
+                auto co_data1 = get_data_input(co_mul1);
+                has_silu = is_swish_like(co_data0) || is_swish_like(co_data1);
+            }
+        }
+
+        std::shared_ptr<Node> cache_position_node = nullptr;
+        if (has_silu) {
+            cache_position_node = v0::Constant::create(element::i32, Shape{}, {-1});
+        } else {
+            cache_position_node = find_cache_position(conv_state_dec);
+            if (!cache_position_node) {
+                return false;
+            }
+        }
+
+        const auto* assign_ptr = assign_node.get();
+        const bool rv_dep = has_upstream_node(read_value, assign_ptr);
+        const bool hs_dep = has_upstream_node(hidden_states, assign_ptr);
+        const bool w_dep = has_upstream_node(weight, assign_ptr);
+        const bool cp_dep = has_upstream_node(cache_position_node, assign_ptr);
+        const bool b_dep = bias && has_upstream_node(bias, assign_ptr);
+        if (rv_dep || hs_dep || w_dep || cp_dep || b_dep) {
+            return false;
+        }
+
+        const bool rv_down = has_upstream_node(read_value, conv_out_add.get());
+        const bool w_down = has_upstream_node(weight, conv_out_add.get());
+        const bool cp_down = has_upstream_node(cache_position_node, conv_out_add.get());
+        const bool b_down = bias && has_upstream_node(bias, conv_out_add.get());
+        if (rv_down || w_down || cp_down || b_down) {
+            return false;
+        }
+
+        Output<Node> cache_position_output = cache_position_node->output(0);
 
         OutputVector args = {read_value, hidden_states, weight, cache_position_output};
         if (bias) {
             args.push_back(bias);
         }
+        const int32_t activation_val = has_silu ? 1 : 0;
+        auto activation_const = v0::Constant::create(element::i32, Shape{}, {activation_val});
+        args.push_back(activation_const);
         auto causal = std::make_shared<ov::op::internal::CausalConv1D>(args);
         causal->set_friendly_name(conv_out_add->get_friendly_name() + "/CausalConv1D");
 
-        copy_runtime_info(
-            {conv_out_add, new_state_add, assign_node, group_conv, read_value, hidden_states, weight, cache_position},
-            causal);
+        copy_runtime_info({conv_out_add,
+                           new_state_add,
+                           assign_node,
+                           group_conv,
+                           read_value,
+                           hidden_states,
+                           weight,
+                           cache_position_node,
+                           activation_const},
+                          causal);
 
         // Replace conv_out
         conv_out_add->output(0).replace(causal->output(0));

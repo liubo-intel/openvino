@@ -12,10 +12,10 @@ namespace ov::pass {
 // clang-format off
 /**
  * @ingroup ov_transformation_common_api
- * @brief This transformation fuses the LFM2 short conv1d cache subgraph into a single
- * CausalConv1D internal op.
+ * @brief This transformation fuses the LFM2 short conv1d cache subgraph and the
+ * qwen3_next linear-attn conv1d subgraph into a single CausalConv1D internal op.
  *
- * Following graph (simplified):
+ * Following graph (simplified, LFM2):
  *
  *   ReadValue(cache)   hidden_states(Bx)   weight   (bias)
  *        |                    |             |        |
@@ -45,6 +45,37 @@ namespace ov::pass {
  *                          conv_out     new_state
  *                                            |
  *                                         Assign
+ *
+ * Following graph (simplified, qwen3_next):
+ *
+ *   ReadValue(cache)   hidden_states(mixed_qkv)   weight   (bias)   Swish
+ *        |                    |             |        |        |
+ *        |                    |             |        |        |
+ *        |                    +-------> GroupConvolution ----> Swish -> conv_out_prefill
+ *        |                                   |
+ *        |                                   +--------------------------> conv_out_prefill (pre-activation)
+ *        |                    |
+ *        |                    +--> Pad -------------------------------> conv_state_prefill
+ *        |
+ *        +--> concat(cache, hidden) -> GroupConvolution -> Swish ----> conv_out_dec
+ *
+ *   is_decoding = (seq_len == 1)
+ *   conv_out  = conv_out_dec * is_decoding + conv_out_prefill * (1 - is_decoding)
+ *   new_state = conv_state_dec * is_decoding + conv_state_prefill * (1 - is_decoding)
+ *   Assign(new_state)
+ *
+ * is transformed to:
+ *
+ *   ReadValue(cache)   hidden_states(mixed_qkv)   weight   cache_position*  (bias)  activation
+ *        |                    |             |           |             |         |
+ *        +--------------------+-------------+-----------+-------------+---------+
+ *                                CausalConv1D
+ *                               /          \
+ *                          conv_out     new_state
+ *                                            |
+ *                                         Assign
+ *
+ *   * cache_position is optional for qwen3_next (placeholder -1 is used to indicate "no cache_position").
  */
 // clang-format on
 class TRANSFORMATIONS_API CausalConv1DFusion : public ov::pass::MatcherPass {
