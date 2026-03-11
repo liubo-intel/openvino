@@ -16,21 +16,17 @@ namespace internal {
 /// Internal operation which may change in the future.
 ///
 /// Inputs:
-/// 0: cache [B, C, L]
-/// 1: hidden_states (Bx) [B, C, T]
+/// 0: input_embeds [B, C, T]
+/// 1: conv_state [B, C, S]
 /// 2: weight [C, 1, 1, L] (or [C, 1, L])
-/// 3: cache_position [T] (or scalar, optional for qwen3_next)
-/// 4: bias [C] (optional)
-/// 5: activation (optional scalar, int; 0=None, 1=SiLU)
+/// 3: bias [C] (optional)
 ///
 /// Outputs:
 /// 0: conv_out [B, C, T]
-/// 1: new_conv_state [B, C, L]
+/// 1: new_conv_state [B, C, S]
 class TRANSFORMATIONS_API CausalConv1D : public Op {
 public:
     OPENVINO_OP("CausalConv1D", "ie_internal_opset", Op);
-
-    enum class ActivationType : int64_t { None = 0, SiLU = 1 };
 
     CausalConv1D() = default;
 

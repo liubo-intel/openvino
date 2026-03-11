@@ -19,18 +19,18 @@ bool CausalConv1D::visit_attributes(AttributeVisitor& visitor) {
 }
 
 void CausalConv1D::validate_and_infer_types() {
-    OPENVINO_ASSERT(get_input_size() >= 4 && get_input_size() <= 6,
-                    "CausalConv1D expects 4..6 inputs, got ",
+    OPENVINO_ASSERT(get_input_size() >= 3 && get_input_size() <= 4,
+                    "CausalConv1D expects 3..4 inputs, got ",
                     get_input_size());
 
-    const auto cache_pshape = get_input_partial_shape(0);
-    const auto hidden_pshape = get_input_partial_shape(1);
+    const auto hidden_pshape = get_input_partial_shape(0);
+    const auto cache_pshape = get_input_partial_shape(1);
 
-    // Output 0: conv_out has the same shape as hidden_states
-    set_output_type(0, get_input_element_type(1), hidden_pshape);
+    // Output 0: conv_out has the same shape as input_embeds
+    set_output_type(0, get_input_element_type(0), hidden_pshape);
 
-    // Output 1: new_conv_state has the same shape as cache
-    set_output_type(1, get_input_element_type(0), cache_pshape);
+    // Output 1: new_conv_state has the same shape as conv_state
+    set_output_type(1, get_input_element_type(1), cache_pshape);
 }
 
 std::shared_ptr<Node> CausalConv1D::clone_with_new_inputs(const OutputVector& new_args) const {
