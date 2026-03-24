@@ -17,6 +17,7 @@
 #include "openvino/op/group_conv.hpp"
 #include "openvino/op/read_value.hpp"
 #include "openvino/op/slice.hpp"
+#include "openvino/op/strided_slice.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
 #include "ov_ops/causal_conv1d.hpp"
@@ -107,12 +108,15 @@ bool has_upstream_read_value(const std::shared_ptr<Node>& start) {
     return false;
 }
 
-std::shared_ptr<v8::Slice> find_slice_user(const Output<Node>& output) {
+bool is_supported_slice(const std::shared_ptr<Node>& node) {
+    return ov::is_type<v8::Slice>(node) || ov::is_type<v1::StridedSlice>(node);
+}
+
+std::shared_ptr<Node> find_slice_user(const Output<Node>& output) {
     for (const auto& target : output.get_target_inputs()) {
         auto node = target.get_node()->shared_from_this();
-        auto slice = ov::as_type_ptr<v8::Slice>(node);
-        if (slice) {
-            return slice;
+        if (is_supported_slice(node)) {
+            return node;
         }
     }
     return nullptr;
@@ -171,8 +175,8 @@ ov::pass::CausalConv1DFusion::CausalConv1DFusion() {
         }
 
         auto assign_input = assign_node->input_value(0).get_node_shared_ptr();
-        auto state_slice = ov::as_type_ptr<v8::Slice>(skip_broadcast(assign_input));
-        if (!state_slice) {
+        auto state_slice = skip_broadcast(assign_input);
+        if (!is_supported_slice(state_slice)) {
             return false;
         }
 
