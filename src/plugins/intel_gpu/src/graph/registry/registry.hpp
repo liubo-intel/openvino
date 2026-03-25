@@ -131,6 +131,7 @@ REGISTER_IMPLS(arg_max_min);
 REGISTER_IMPLS(broadcast);
 REGISTER_IMPLS(concatenation);
 REGISTER_IMPLS(convolution);
+REGISTER_IMPLS(causal_conv1d);
 REGISTER_IMPLS(crop);
 REGISTER_IMPLS(ctc_loss);
 REGISTER_IMPLS(deconvolution);

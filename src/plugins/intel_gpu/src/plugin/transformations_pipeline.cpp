@@ -70,6 +70,7 @@
 #include "openvino/pass/constant_folding.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/pass/pattern/op/wrap_type.hpp"
+#include "openvino/pass/serialize.hpp"
 #include "openvino/pass/visualize_tree.hpp"
 #include "openvino/pass/sdpa_to_vlsdpa.hpp"
 #include "plugin/transformations/bcast_and_pad_zp_buffers.hpp"
@@ -112,6 +113,7 @@
 #include "transformations/common_optimizations/common_optimizations.hpp"
 #include "transformations/common_optimizations/convert_pagedattn_inputs.hpp"
 #include "transformations/common_optimizations/convert_quantize_dequantize.hpp"
+#include "transformations/common_optimizations/fuse_causal_conv1d.hpp"
 #include "transformations/common_optimizations/fuse_rotary_positional_embeddings.hpp"
 #include "transformations/common_optimizations/fuse_gated_delta_net.hpp"
 #include "transformations/common_optimizations/glu_fusion.hpp"
@@ -1409,6 +1411,10 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
     {
         ov::pass::Manager manager("GPU:PostLPT");
         manager.set_per_pass_validation(false);
+
+        // my tests
+        // manager.register_pass<ov::pass::Serialize>("my_ir_before_CausalConv1DFusion.xml", "my_ir_before_CausalConv1DFusion.bin");
+        manager.register_pass<ov::pass::CausalConv1DFusion>();
 
         manager.register_pass<ov::pass::ConvertWeightCompressedConv1x1ToMatmul>();
         manager.register_pass<ov::intel_gpu::IncreaseRMSInputPrecision>();
