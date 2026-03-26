@@ -90,6 +90,51 @@ public:
         add_stage(causal_conv1d_stage, params);
     }
 
+    [[nodiscard]] cldnn::kernel_arguments_data get_arguments(const cldnn::primitive_inst& instance) const override {
+        auto args = PrimitiveImplOCL::get_arguments(instance);
+        const auto& desc = instance.get_typed_desc<cldnn::causal_conv1d>();
+
+        if (desc->variable_info.variable_id.empty()) {
+            return args;
+        }
+
+        auto& variable = instance.get_network().get_variable(desc->variable_info.variable_id);
+
+        OPENVINO_ASSERT(args.inputs.size() >= 2, "[GPU] causal_conv1d expects at least 2 inputs");
+        OPENVINO_ASSERT(args.outputs.size() >= 2, "[GPU] causal_conv1d expects 2 outputs");
+
+        // Reuse variable state once initialized; otherwise use conv_state input.
+        if (variable.is_set()) {
+            args.inputs[1] = variable.get_memory();
+        }
+        // Write updated state directly to variable memory and avoid explicit Assign copy.
+        args.outputs[1] = variable.get_memory();
+
+        return args;
+    }
+
+    cldnn::event::ptr execute(const std::vector<cldnn::event::ptr>& events, cldnn::primitive_inst& instance) override {
+        const auto& desc = instance.get_typed_desc<cldnn::causal_conv1d>();
+
+        if (!desc->variable_info.variable_id.empty()) {
+            auto& variable = instance.get_network().get_variable(desc->variable_info.variable_id);
+
+            // Keep variable layout in sync with runtime state shape.
+            variable.set_layout(instance.input_memory_ptr(1)->get_layout());
+
+            // State source can change from conv_state input to variable after first iteration.
+            for (const auto& stage_id : _order) {
+                _stages[stage_id]->kd.need_args_update = true;
+            }
+
+            auto ev = PrimitiveImplOCL::execute(events, instance);
+            variable.set();
+            return ev;
+        }
+
+        return PrimitiveImplOCL::execute(events, instance);
+    }
+
     [[nodiscard]] std::unique_ptr<primitive_impl> clone() const override {
         return make_deep_copy<CausalConv1DRefImpl>(this);
     }

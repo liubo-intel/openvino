@@ -76,6 +76,7 @@
 #include "plugin/transformations/bcast_and_pad_zp_buffers.hpp"
 #include "plugin/transformations/binary_conv_to_conv.hpp"
 #include "plugin/transformations/clamp_fp16_output.hpp"
+#include "plugin/transformations/causal_conv1d_variable_fusion.hpp"
 #include "plugin/transformations/convert_convolution.hpp"
 #include "plugin/transformations/convert_fc_to_compressed.hpp"
 #include "plugin/transformations/convert_matmul_to_fc.hpp"
@@ -1415,6 +1416,7 @@ void TransformationsPipeline::apply(std::shared_ptr<ov::Model> func) {
         // my tests
         // manager.register_pass<ov::pass::Serialize>("my_ir_before_CausalConv1DFusion.xml", "my_ir_before_CausalConv1DFusion.bin");
         manager.register_pass<ov::pass::CausalConv1DFusion>();
+        manager.register_pass<ov::intel_gpu::CausalConv1DVariableFusion>();
 
         manager.register_pass<ov::pass::ConvertWeightCompressedConv1x1ToMatmul>();
         manager.register_pass<ov::intel_gpu::IncreaseRMSInputPrecision>();

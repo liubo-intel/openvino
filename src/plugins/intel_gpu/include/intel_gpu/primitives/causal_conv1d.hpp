@@ -5,6 +5,7 @@
 #pragma once
 
 #include "primitive.hpp"
+#include "openvino/op/util/variable.hpp"
 #include "ov_ops/causal_conv1d.hpp"
 
 namespace cldnn {
@@ -25,24 +26,46 @@ struct causal_conv1d : public primitive_base<causal_conv1d> {
 
     causal_conv1d() : primitive_base("", {}) {}
 
-    causal_conv1d(const primitive_id& id, const std::vector<input_info>& inputs)
-        : primitive_base(id, inputs) {}
+    causal_conv1d(const primitive_id& id,
+                  const std::vector<input_info>& inputs,
+                  const ov::op::util::VariableInfo& variable_info = {})
+        : primitive_base(id, inputs),
+          variable_info(variable_info) {}
+
+    ov::op::util::VariableInfo variable_info;
 
     size_t hash() const override {
         size_t seed = primitive::hash();
+        seed = hash_combine(seed, std::hash<std::string>()(variable_info.variable_id));
+        seed = hash_combine(seed, variable_info.data_type.hash());
         return seed;
     }
 
     bool operator==(const primitive& rhs) const override {
-        return compare_common_params(rhs);
+        if (!compare_common_params(rhs))
+            return false;
+
+        auto rhs_casted = downcast<const causal_conv1d>(rhs);
+        return variable_info == rhs_casted.variable_info;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<causal_conv1d>::save(ob);
+        ov::element::Type_t data_type = variable_info.data_type;
+        ob << variable_info.variable_id;
+        ob << variable_info.data_shape;
+        ob << make_data(&data_type, sizeof(ov::element::Type_t));
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<causal_conv1d>::load(ib);
+        ov::PartialShape data_shape;
+        ov::element::Type_t data_type = ov::element::Type_t::dynamic;
+        std::string variable_id;
+        ib >> variable_id;
+        ib >> data_shape;
+        ib >> make_data(&data_type, sizeof(ov::element::Type_t));
+        variable_info = {data_shape, data_type, variable_id};
     }
 };
 
