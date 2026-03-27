@@ -34,6 +34,11 @@
 #include "read_value_inst.h"
 #include "reshape_inst.h"
 #include "kv_cache_inst.h"
+<<<<<<< Updated upstream
+=======
+#include "causal_conv1d_inst.h"
+#include "gpu_trace_dump.hpp"
+>>>>>>> Stashed changes
 #include "program_helpers.h"
 #include "program_dump_graph.h"
 
@@ -280,6 +285,8 @@ void network::preallocate_shape_info_buffers() {
 }
 
 void network::set_arguments() {
+    auto trace_scope = gpu_trace_dump::make_scope("network::set_arguments", "data_flow");
+
     if (!_reset_arguments)
         return;
 
@@ -317,6 +324,8 @@ void network::reset_execution(bool wait) {
 }
 
 event::ptr network::set_input_data(const primitive_id& id, memory::ptr data, bool need_to_check_memory_to_set) {
+    auto trace_scope = gpu_trace_dump::make_scope("network::set_input_data:" + id, "data_flow");
+
     GPU_DEBUG_TRACE_DETAIL << "Set input " << id << " " << data->get_layout().to_short_string() << std::endl;
     auto primitive_inst = find_primitive(id);
 
@@ -460,6 +469,8 @@ network::output_chains_map::iterator network::add_output_chain(std::shared_ptr<p
 }
 
 std::vector<event::ptr> network::set_output_memory(const primitive_id& id, memory::ptr mem_new, bool is_remote) {
+    auto trace_scope = gpu_trace_dump::make_scope("network::set_output_memory:" + id, "data_flow");
+
     GPU_DEBUG_TRACE_DETAIL << "Set output " << id << " " << mem_new->get_layout().to_short_string() << std::endl;
     std::vector<event::ptr> ret_ev;
     std::shared_ptr<primitive_inst> p_inst = find_primitive(id);
@@ -677,6 +688,8 @@ void network::add_to_exec_order(const primitive_id& id) {
 }
 
 std::map<primitive_id, network_output> network::execute(const std::vector<event::ptr>& dependencies) {
+    auto trace_scope = gpu_trace_dump::make_scope("network::execute", "inference");
+
     OV_ITT_SCOPED_TASK(ov::intel_gpu::itt::domains::intel_gpu_plugin, "NetworkImpl::Execute");
     NETWORK_DEBUG(*this);
 
@@ -750,6 +763,8 @@ bool network::has_event(const primitive_id& id) const {
 }
 
 void network::execute_impl(const std::vector<event::ptr>& events) {
+    auto trace_scope = gpu_trace_dump::make_scope("network::execute_impl", "inference");
+
     set_arguments();
 
     // This extra flush command is needed for dynamic models in both cases of out_of_order / in_order operating mode
@@ -769,8 +784,15 @@ void network::execute_impl(const std::vector<event::ptr>& events) {
             inst->add_dep_events(events);
         }
 
-        inst->prepare_primitive();
-        inst->execute();
+        if (gpu_trace_dump::is_enabled()) {
+            const auto node_name = "node::" + inst->desc()->type_string() + ":" + inst->id();
+            auto node_trace_scope = gpu_trace_dump::make_scope(node_name, "node");
+            inst->prepare_primitive();
+            inst->execute();
+        } else {
+            inst->prepare_primitive();
+            inst->execute();
+        }
 
         executed_prims++;
         if (needs_flushing && executed_prims % flush_frequency == 0)
