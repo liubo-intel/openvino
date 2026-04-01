@@ -4,12 +4,53 @@
 
 #include "causal_conv1d_ref.hpp"
 
+#include "common_utils/dispatch_utils.hpp"
 #include "intel_gpu/primitives/causal_conv1d.hpp"
 #include "primitive_ocl_base.hpp"
 #include "utils/kernel_generator.hpp"
 
 namespace ov::intel_gpu::ocl {
 namespace {
+
+size_t get_hidden_size(const cldnn::layout& hidden_layout, bool transposed_io) {
+    const auto& pshape = hidden_layout.get_partial_shape();
+    OPENVINO_ASSERT(pshape.rank().is_static() && pshape.rank().get_length() >= 3, "[GPU] causal_conv1d expects rank >= 3 for input_embeds");
+
+    const auto& second_last_dim = pshape[pshape.size() - 2];
+    const auto& last_dim = pshape[pshape.size() - 1];
+
+    if (transposed_io) {
+        OPENVINO_ASSERT(last_dim.is_static(), "[GPU] causal_conv1d expects static hidden size (last dim) for transposed input_embeds");
+        return last_dim.get_length();
+    }
+
+    OPENVINO_ASSERT(second_last_dim.is_static(), "[GPU] causal_conv1d expects static hidden size (second-last dim) for non-transposed input_embeds");
+    return second_last_dim.get_length();
+}
+
+size_t get_seq_len(const cldnn::layout& hidden_layout, bool transposed_io) {
+    const auto& pshape = hidden_layout.get_partial_shape();
+    OPENVINO_ASSERT(pshape.rank().is_static() && pshape.rank().get_length() >= 3, "[GPU] causal_conv1d expects rank >= 3 for input_embeds");
+
+    const auto& second_last_dim = pshape[pshape.size() - 2];
+    const auto& last_dim = pshape[pshape.size() - 1];
+
+    if (transposed_io) {
+        OPENVINO_ASSERT(second_last_dim.is_static(),
+                        "[GPU] causal_conv1d expects static seq_len (second-last dim) at execution time for transposed input_embeds");
+        return second_last_dim.get_length();
+    }
+
+    OPENVINO_ASSERT(last_dim.is_static(), "[GPU] causal_conv1d expects static seq_len (last dim) at execution time for non-transposed input_embeds");
+    return last_dim.get_length();
+}
+
+size_t get_last_static_dim(const ov::PartialShape& pshape, const char* tensor_name) {
+    OPENVINO_ASSERT(pshape.rank().is_static() && pshape.rank().get_length() > 0, "[GPU] ", tensor_name, " rank must be static and non-zero");
+    const auto& last_dim = pshape[pshape.size() - 1];
+    OPENVINO_ASSERT(last_dim.is_static(), "[GPU] ", tensor_name, " trailing dimension must be static");
+    return last_dim.get_length();
+}
 
 class CausalConv1DRefGenerator : public KernelGenerator {
 public:
@@ -18,26 +59,39 @@ public:
 protected:
     [[nodiscard]] JitConstants get_jit_constants(const RuntimeParams& params) const override {
         auto jit = KernelGenerator::get_jit_constants(params);
+        const auto& desc = params.typed_desc<cldnn::causal_conv1d>();
+        const bool transposed_io = desc->transposed_io;
 
-        const auto& hidden_shape = params.get_input_layout(0).get_partial_shape();
-        const auto& cache_shape = params.get_input_layout(1).get_partial_shape();
-        const auto& weight_shape = params.get_input_layout(2).get_partial_shape();
+        const auto& hidden_layout = params.get_input_layout(0);
+        const auto& cache_layout = params.get_input_layout(1);
+        const auto& weight_layout = params.get_input_layout(2);
 
-        const size_t hidden_size = hidden_shape[1].get_length();
-        const size_t cache_len = cache_shape[2].get_length();
-        const size_t kernel_size = weight_shape[weight_shape.size() - 1].get_length();
+        const size_t hidden_size = get_hidden_size(hidden_layout, transposed_io);
+        const size_t cache_len = get_last_static_dim(cache_layout.get_partial_shape(), "conv_state");
+        const size_t kernel_size = get_last_static_dim(weight_layout.get_partial_shape(), "conv_weight");
         const size_t has_bias = params.input_layouts.size() == 4 ? 1 : 0;
+
+        OPENVINO_ASSERT(cache_len == kernel_size,
+                        "[GPU] causal_conv1d currently supports CACHE_LEN == KERNEL_SIZE only, but got CACHE_LEN=",
+                        cache_len,
+                        ", KERNEL_SIZE=",
+                        kernel_size);
 
         jit.make("HIDDEN_SIZE", hidden_size);
         jit.make("CACHE_LEN", cache_len);
         jit.make("KERNEL_SIZE", kernel_size);
         jit.make("HAS_BIAS", has_bias);
+        jit.make("TRANSPOSED_IO", transposed_io ? 1 : 0);
 
         return jit;
     }
 
     [[nodiscard]] Arguments get_arguments_desc(const RuntimeParams& params) const override {
         Arguments args;
+
+        if (params.is_dynamic()) {
+            args.push_back({ArgumentDescriptor::Types::SHAPE_INFO, 0});
+        }
 
         for (uint32_t i = 0; i < params.input_layouts.size(); i++) {
             args.push_back({ArgumentDescriptor::Types::INPUT, i});
@@ -57,11 +111,13 @@ protected:
         return DispatchDataFunc{[](const RuntimeParams& params, KernelData& kd, ImplRuntimeParams* rt_params) {
             assert(!params.is_dynamic());
             auto& wgs = kd.params.workGroups;
+            const auto& prim_desc = params.typed_desc<cldnn::causal_conv1d>();
+            const bool transposed_io = prim_desc->transposed_io;
 
-            const auto& hidden_shape = params.get_input_layout(0).get_partial_shape();
-            const size_t batch = hidden_shape[0].get_length();
-            const size_t hidden_size = hidden_shape[1].get_length();
-            const size_t seq_len = hidden_shape[2].get_length();
+            const auto& hidden_layout = params.get_input_layout(0);
+            const size_t batch = extract_channel(ChannelName::BATCH, hidden_layout);
+            const size_t hidden_size = get_hidden_size(hidden_layout, transposed_io);
+            const size_t seq_len = get_seq_len(hidden_layout, transposed_io);
 
             wgs.global = {batch, hidden_size, 1};
             wgs.local = {1, 256, 1};
@@ -71,10 +127,10 @@ protected:
             }
 
             kd.params.scalars.clear();
-            scalar_desc desc;
-            desc.t = scalar_desc::Types::INT32;
-            desc.v.s32 = static_cast<int32_t>(seq_len);
-            kd.params.scalars.push_back(desc);
+            scalar_desc seq_len_scalar;
+            seq_len_scalar.t = scalar_desc::Types::INT32;
+            seq_len_scalar.v.s32 = static_cast<int32_t>(seq_len);
+            kd.params.scalars.push_back(seq_len_scalar);
         }};
     }
 };
@@ -142,8 +198,7 @@ public:
 
 }  // namespace
 
-std::unique_ptr<primitive_impl> CausalConv1DRef::create_impl(const program_node& node,
-                                                             const RuntimeParams& params) const {
+std::unique_ptr<primitive_impl> CausalConv1DRef::create_impl(const program_node& node, const RuntimeParams& params) const {
     assert(node.is_type<causal_conv1d>());
     return std::make_unique<CausalConv1DRefImpl>(node, params);
 }

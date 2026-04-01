@@ -37,6 +37,7 @@
 #include "space_to_batch_inst.h"
 #include "strided_slice_inst.h"
 #include "cum_sum_inst.h"
+#include "causal_conv1d_inst.h"
 #include "embedding_bag_inst.h"
 #include "swiglu_inst.h"
 #include "extract_image_patches_inst.h"
@@ -707,6 +708,26 @@ void prepare_primitive_fusing::fuse_simple_primitives(program &p) {
 
         auto input_data_supports_fusings = [&](cldnn::program_node& input_data, primitive_id current_node_id) -> bool {
             if (input_data.get_users().size() != 1) {
+                if (input_data.is_type<causal_conv1d>()) {
+                    bool has_current_node_user = false;
+                    bool has_only_state_output_users = true;
+                    for (auto* user : input_data.get_users()) {
+                        if (user->id() == current_node_id) {
+                            has_current_node_user = true;
+                            continue;
+                        }
+
+                        if (user->get_dependency_output_port(input_data) != 1) {
+                            has_only_state_output_users = false;
+                            break;
+                        }
+                    }
+
+                    if (has_current_node_user && has_only_state_output_users) {
+                        return true;
+                    }
+                }
+
                 // If input_data has fused primitives,
                 // find original dependency of current_node using fusing_history
                 // and check the number of users of it.

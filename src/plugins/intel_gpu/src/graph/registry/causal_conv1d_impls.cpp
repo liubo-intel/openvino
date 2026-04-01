@@ -17,7 +17,7 @@ using namespace cldnn;
 const std::vector<std::shared_ptr<cldnn::ImplementationManager>>& Registry<causal_conv1d>::get_implementations() {
     static const std::vector<std::shared_ptr<ImplementationManager>> impls = {
 #if OV_GPU_WITH_OCL
-        OV_GPU_CREATE_INSTANCE_OCL(ocl::CausalConv1DRef, shape_types::static_shape)
+    OV_GPU_CREATE_INSTANCE_OCL(ocl::CausalConv1DRef, shape_types::any)
 #endif
     };
 

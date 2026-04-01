@@ -9,6 +9,7 @@
 #include "intel_gpu/plugin/common_utils.hpp"
 #include "intel_gpu/plugin/program_builder.hpp"
 #include "intel_gpu/primitives/causal_conv1d.hpp"
+#include "plugin/transformations/causal_conv1d_transpose_fusion.hpp"
 #include "plugin/transformations/causal_conv1d_variable_fusion.hpp"
 #include "openvino/op/assign.hpp"
 
@@ -39,6 +40,20 @@ std::optional<std::string> get_variable_id_from_rt_info(const std::shared_ptr<op
         return variable_id;
     } catch (...) {
         return std::nullopt;
+    }
+}
+
+bool get_transposed_io_from_rt_info(const std::shared_ptr<op::internal::CausalConv1D>& op) {
+    const auto& rt_info = op->get_rt_info();
+    auto it = rt_info.find(causal_conv1d_transposed_io_rt_key);
+    if (it == rt_info.end()) {
+        return false;
+    }
+
+    try {
+        return it->second.as<bool>();
+    } catch (...) {
+        return false;
     }
 }
 
@@ -78,7 +93,8 @@ static void CreateCausalConv1DOp(ProgramBuilder& p, const std::shared_ptr<op::in
 
     cldnn::causal_conv1d prim(layer_type_name_ID(op),
                               inputs,
-                              variable_info.has_value() ? variable_info.value() : ov::op::util::VariableInfo{});
+                              variable_info.has_value() ? variable_info.value() : ov::op::util::VariableInfo{},
+                              get_transposed_io_from_rt_info(op));
     prim.num_outputs = op->get_output_size();
     prim.output_data_types = get_output_data_types(op);
 

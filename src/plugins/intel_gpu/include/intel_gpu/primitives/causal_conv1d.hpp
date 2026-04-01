@@ -28,16 +28,20 @@ struct causal_conv1d : public primitive_base<causal_conv1d> {
 
     causal_conv1d(const primitive_id& id,
                   const std::vector<input_info>& inputs,
-                  const ov::op::util::VariableInfo& variable_info = {})
+              const ov::op::util::VariableInfo& variable_info = {},
+              bool transposed_io = false)
         : primitive_base(id, inputs),
-          variable_info(variable_info) {}
+          variable_info(variable_info),
+          transposed_io(transposed_io) {}
 
     ov::op::util::VariableInfo variable_info;
+        bool transposed_io = false;
 
     size_t hash() const override {
         size_t seed = primitive::hash();
         seed = hash_combine(seed, std::hash<std::string>()(variable_info.variable_id));
         seed = hash_combine(seed, variable_info.data_type.hash());
+        seed = hash_combine(seed, transposed_io);
         return seed;
     }
 
@@ -46,7 +50,7 @@ struct causal_conv1d : public primitive_base<causal_conv1d> {
             return false;
 
         auto rhs_casted = downcast<const causal_conv1d>(rhs);
-        return variable_info == rhs_casted.variable_info;
+        return variable_info == rhs_casted.variable_info && transposed_io == rhs_casted.transposed_io;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
@@ -55,6 +59,7 @@ struct causal_conv1d : public primitive_base<causal_conv1d> {
         ob << variable_info.variable_id;
         ob << variable_info.data_shape;
         ob << make_data(&data_type, sizeof(ov::element::Type_t));
+        ob << transposed_io;
     }
 
     void load(BinaryInputBuffer& ib) override {
@@ -65,6 +70,7 @@ struct causal_conv1d : public primitive_base<causal_conv1d> {
         ib >> variable_id;
         ib >> data_shape;
         ib >> make_data(&data_type, sizeof(ov::element::Type_t));
+        ib >> transposed_io;
         variable_info = {data_shape, data_type, variable_id};
     }
 };
