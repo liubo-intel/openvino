@@ -264,7 +264,10 @@ static const TypeToNameMap& get_type_to_name_tbl() {
         {"LoraSubgraph", Type::LoRA},
         {"GatherMatmul", Type::GatherMatmul},
         {"GatherMatmulCompressed", Type::GatherMatmul},
-        {"GatedDeltaNet", Type::GatedDeltaNet}};
+        {"BatchGatherMatmul", Type::GatherMatmul},
+        {"BatchGatherMatmulCompressed", Type::GatherMatmul},
+        {"GatedDeltaNet", Type::GatedDeltaNet},
+        {"PagedCausalConv1D", Type::PagedCausalConv1D}};
     return type_to_name_tbl;
 }
 
@@ -401,6 +404,7 @@ std::string NameFromType(const Type type) {
         CASE(LoRA);
         CASE(GatherMatmul);
         CASE(GatedDeltaNet);
+        CASE(PagedCausalConv1D);
         CASE(Unknown);
     }
 #undef CASE

@@ -25,13 +25,14 @@ inline void input_check(const ov::Node* node,
     const auto& rank = node->get_input_partial_shape(idx).rank();
     const auto& tp = node->get_input_element_type(idx);
 
-    auto rank_check = [&](const Rank& rank) {
-        return !rank.is_dynamic() && is_rank_compatible_any_of(rank.get_length(), allowed_ranks);
+<<<<<<< HEAD
+    auto rank_check = [&](const Rank& rank_val) {
+        return !rank_val.is_dynamic() && is_rank_compatible_any_of(rank_val.get_length(), allowed_ranks);
     };
 
-    auto type_check = [&](const Type& type) {
-        auto it = std::find(allowed_types.begin(), allowed_types.end(), tp);
-        return !type.is_dynamic() && (allowed_types.empty() || it != allowed_types.end());
+    auto type_check = [&](const Type& type_val) {
+        const auto it = std::find(allowed_types.begin(), allowed_types.end(), tp);
+        return !type_val.is_dynamic() && (allowed_types.empty() || it != allowed_types.end());
     };
 
     NODE_VALIDATION_CHECK(node,
