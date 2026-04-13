@@ -25,7 +25,6 @@ inline void input_check(const ov::Node* node,
     const auto& rank = node->get_input_partial_shape(idx).rank();
     const auto& tp = node->get_input_element_type(idx);
 
-<<<<<<< HEAD
     auto rank_check = [&](const Rank& rank_val) {
         return !rank_val.is_dynamic() && is_rank_compatible_any_of(rank_val.get_length(), allowed_ranks);
     };
@@ -104,6 +103,27 @@ void PagedCausalConv1D::validate_and_infer_types() {
     input_check(this, 7, "past_lens", {1}, {ov::element::i32});
     input_check(this, 8, "cache_interval", {1}, {ov::element::i32});
 
+    const auto& input_embeds_ps = get_input_partial_shape(0);
+    const auto& conv_weight_ps = get_input_partial_shape(2);
+    const auto& conv_bias_ps = get_input_partial_shape(3);
+
+    // Optional bias is represented as an empty 1D tensor with shape [0].
+    const auto& bias_dim = conv_bias_ps[0];
+    const bool bias_is_empty = bias_dim.is_static() && bias_dim.get_length() == 0;
+    NODE_VALIDATION_CHECK(this,
+                          bias_is_empty || bias_dim.compatible(input_embeds_ps[1]),
+                          "conv_bias shape must be [0] (optional bias) or [hidden_size]. Got conv_bias[0]=",
+                          bias_dim,
+                          ", input_embeds[1]=",
+                          input_embeds_ps[1],
+                          ".");
+    NODE_VALIDATION_CHECK(this,
+                          bias_is_empty || bias_dim.compatible(conv_weight_ps[0]),
+                          "conv_bias shape must be [0] (optional bias) or [out_channels]. Got conv_bias[0]=",
+                          bias_dim,
+                          ", conv_weight[0]=",
+                          conv_weight_ps[0],
+                          ".");
     const auto output_shapes = shape_infer(this, ov::util::get_node_input_partial_shapes(*this));
     set_output_type(0, get_input_element_type(0), output_shapes[0]);
 }

@@ -1,11 +1,13 @@
 // Copyright (C) 2018-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 //
+
 #pragma once
 
 #include "openvino/op/op.hpp"
 
 namespace ov::op::internal {
+
 /// \note PagedCausalConv1D op class is under development and subject to change
 ///
 /// \brief Operator performing paged causal 1D convolution for linear attention models.
@@ -18,6 +20,7 @@ public:
     OPENVINO_OP("PagedCausalConv1D");
 
     PagedCausalConv1D() = default;
+
     /// \brief Constructs a PagedCausalConv1D operation.
     ///
     /// \param input_embeds Input embeddings [batch_size_in_tokens, hidden_size].

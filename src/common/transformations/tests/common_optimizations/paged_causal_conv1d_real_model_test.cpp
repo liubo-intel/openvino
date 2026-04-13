@@ -68,7 +68,6 @@ TEST(PagedCausalConv1DRealModel, SDPAToPACreatesSeveralPagedOps) {
 
     const auto sdpa_count_before = count_ops_by_type(model, "ScaledDotProductAttention");
     ASSERT_GE(sdpa_count_before, 1u);
-
     ov::pass::Manager sdpa_to_pa_pm;
     sdpa_to_pa_pm.register_pass<ov::pass::SDPAToPagedAttention>(false, false, false, false, false, false);
     sdpa_to_pa_pm.run_passes(model);

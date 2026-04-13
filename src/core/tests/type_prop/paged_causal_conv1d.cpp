@@ -170,6 +170,22 @@ TEST(type_prop, paged_causal_conv1d_kernel_size_mismatch) {
                     testing::HasSubstr("kernel_size dimension of conv_state_table and conv_weight should be "
                                        "compatible"));
 }
+TEST(type_prop, paged_causal_conv1d_optional_empty_bias) {
+    const auto op = make_pcc(element::f32,
+                             Shape{10, 256},
+                             Shape{5, 256, 4},
+                             Shape{256, 1, 4},
+                             Shape{0},
+                             Shape{3},
+                             Shape{5},
+                             Shape{3},
+                             Shape{2},
+                             Shape{2});
+
+    EXPECT_EQ(op->get_output_size(), 1);
+    EXPECT_EQ(op->get_output_element_type(0), element::f32);
+    EXPECT_EQ(op->get_output_partial_shape(0), PartialShape(Shape{10, 256}));
+}
 
 TEST(type_prop, paged_causal_conv1d_wrong_input_count) {
     auto p = std::make_shared<op::v0::Parameter>(element::f32, Shape{10, 256});
