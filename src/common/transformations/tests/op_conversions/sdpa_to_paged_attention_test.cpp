@@ -888,6 +888,81 @@ TEST_F(SDPAToPATest, SDPAToPA_PositionIDsReplacerLFM2_DirectParameterBranch) {
     disable_rt_info_check();
 }
 
+TEST_F(SDPAToPATest, SDPAToPA_PositionIDsReplacerLFM2_CosSinLayoutFix) {
+    // Verify that when a downstream Unsqueeze/Reshape produces rank-4 cos/sin
+    // (as in the real LFM2 model), the transformation transposes the layout
+    // from [1, 1, seq, dim] to [seq, 1, 1, dim] so that the RoPE executor
+    // can index per-token cos/sin via the batch dimension.
+    {
+        auto max_context_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto prev_seq_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto curr_seq_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto lhs = std::make_shared<v0::Parameter>(element::f32, PartialShape{1, 32, 1});
+        auto position_ids = std::make_shared<v0::Parameter>(element::i64, PartialShape{DYN});
+
+        auto start_subtract = std::make_shared<v1::Subtract>(max_context_len, prev_seq_len);
+        auto start = std::make_shared<v0::Convert>(start_subtract, element::i64);
+        auto end = std::make_shared<v1::Add>(start, curr_seq_len);
+        auto step = v0::Constant::create(element::i64, Shape{}, {1});
+        auto range = std::make_shared<v4::Range>(start, end, step, element::i64);
+
+        auto shape_3d = v0::Constant::create(element::i64, Shape{3}, {1, 1, -1});
+        auto reshape = std::make_shared<v1::Reshape>(range, shape_3d, false);
+        auto convert = std::make_shared<v0::Convert>(reshape, element::f32);
+        auto matmul = std::make_shared<v0::MatMul>(lhs, convert, false, false);
+        auto transpose = std::make_shared<v1::Transpose>(
+            matmul, v0::Constant::create(element::i64, Shape{3}, {0, 2, 1}));
+        auto concat = std::make_shared<v0::Concat>(OutputVector{transpose, transpose}, 2);
+        auto cos = std::make_shared<v0::Cos>(concat);
+        auto sin = std::make_shared<v0::Sin>(concat);
+        // Unsqueeze from [1, seq, 64] to [1, 1, seq, 64] (as in real LFM2)
+        auto cos_4d_shape = v0::Constant::create(element::i64, Shape{4}, {1, 1, -1, 64});
+        auto cos_4d = std::make_shared<v1::Reshape>(cos, cos_4d_shape, false);
+        auto sin_4d_shape = v0::Constant::create(element::i64, Shape{4}, {1, 1, -1, 64});
+        auto sin_4d = std::make_shared<v1::Reshape>(sin, sin_4d_shape, false);
+
+        model = std::make_shared<Model>(
+            ResultVector{std::make_shared<v0::Result>(cos_4d), std::make_shared<v0::Result>(sin_4d)},
+            ParameterVector{max_context_len, prev_seq_len, curr_seq_len, lhs, position_ids});
+        manager.register_pass<pass::PositionIDsReplacerLFM2>(position_ids);
+    }
+
+    {
+        auto max_context_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto prev_seq_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto curr_seq_len = std::make_shared<v0::Parameter>(element::i64, PartialShape{});
+        auto lhs = std::make_shared<v0::Parameter>(element::f32, PartialShape{1, 32, 1});
+        auto position_ids = std::make_shared<v0::Parameter>(element::i64, PartialShape{DYN});
+
+        auto shape_3d = v0::Constant::create(element::i64, Shape{3}, {1, 1, -1});
+        auto reshape = std::make_shared<v1::Reshape>(position_ids, shape_3d, false);
+        auto convert = std::make_shared<v0::Convert>(reshape, element::f32);
+        auto matmul = std::make_shared<v0::MatMul>(lhs, convert, false, false);
+        auto transpose = std::make_shared<v1::Transpose>(
+            matmul, v0::Constant::create(element::i64, Shape{3}, {0, 2, 1}));
+        auto concat = std::make_shared<v0::Concat>(OutputVector{transpose, transpose}, 2);
+        auto cos = std::make_shared<v0::Cos>(concat);
+        auto sin = std::make_shared<v0::Sin>(concat);
+        // Expected: Transpose [1, seq, 64] → [seq, 1, 64], then Unsqueeze → [seq, 1, 1, 64]
+        auto cos_transpose = std::make_shared<v1::Transpose>(
+            cos, v0::Constant::create(element::i64, Shape{3}, {1, 0, 2}));
+        auto cos_unsqueeze = std::make_shared<v0::Unsqueeze>(
+            cos_transpose, v0::Constant::create(element::i64, Shape{1}, {2}));
+        auto sin_transpose = std::make_shared<v1::Transpose>(
+            sin, v0::Constant::create(element::i64, Shape{3}, {1, 0, 2}));
+        auto sin_unsqueeze = std::make_shared<v0::Unsqueeze>(
+            sin_transpose, v0::Constant::create(element::i64, Shape{1}, {2}));
+
+        model_ref = std::make_shared<Model>(
+            OutputVector{cos_unsqueeze, sin_unsqueeze},
+            ParameterVector{max_context_len, prev_seq_len, curr_seq_len, lhs, position_ids});
+    }
+
+    comparator.disable(FunctionsComparator::PRECISIONS);
+    disable_result_friendly_names_check();
+    disable_rt_info_check();
+}
+
 // TODO: split the models in blocks the way it's done for Qwen and make the code not to be such a clutter
 // TODO: write a test for StateManagementPattern only (because changes for Alibi are inside it)
 // TODO: align precisions, check the copying of "fuse_names" attr in SDPAToPagedAttention
