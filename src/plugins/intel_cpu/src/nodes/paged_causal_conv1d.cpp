@@ -20,7 +20,9 @@
 #include "onednn/iml_type_mapper.h"
 #include "openvino/core/except.hpp"
 #include "openvino/core/node.hpp"
+#include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/element_type.hpp"
+#include "openvino/core/type/float16.hpp"
 #include "openvino/op/paged_causal_conv1d.hpp"
 #include "shape_inference/shape_inference_cpu.hpp"
 
@@ -50,10 +52,11 @@ void PagedCausalConv1D::initSupportedPrimitiveDescriptors() {
     }
 
     const auto data_precision = ov::element::f32;
+    const auto state_precision = getOriginalInputPrecisionAtPort(1);
     std::vector<PortConfigurator> input_configs;
     input_configs.reserve(getParentEdges().size());
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(0), false, -1);
-    input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(1), false, -1);
+    input_configs.emplace_back(LayoutType::ncsp, state_precision, getInputShapeAtPort(1), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(2), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, data_precision, getInputShapeAtPort(3), false, -1);
     input_configs.emplace_back(LayoutType::ncsp, ov::element::i32, getInputShapeAtPort(4), false, -1);
@@ -115,7 +118,8 @@ void PagedCausalConv1D::execute([[maybe_unused]] const dnnl::stream& strm) {
                     hidden_size);
 
     const auto* input_embeds = getSrcDataAtPortAs<const float>(0);
-    auto* conv_state_table = getSrcMemoryAtPort(1)->getDataAs<float>();
+    const auto state_precision = getSrcMemoryAtPort(1)->getDescPtr()->getPrecision();
+    auto* conv_state_raw = getSrcMemoryAtPort(1)->getData();
     const auto* conv_weight = getSrcDataAtPortAs<const float>(2);
     const float* conv_bias = has_bias ? getSrcDataAtPortAs<const float>(3) : nullptr;
     const auto* subsequence_begins = getSrcDataAtPortAs<const int32_t>(4);
@@ -134,23 +138,38 @@ void PagedCausalConv1D::execute([[maybe_unused]] const dnnl::stream& strm) {
     const size_t state_stride = hidden_size * kernel_size;
     std::vector<float> local_state(state_stride);
 
-    kernels::paged_causal_conv1d_optimized(input_embeds,
-                                           conv_state_table,
-                                           conv_weight,
-                                           conv_bias,
-                                           has_bias,
-                                           subsequence_begins,
-                                           block_indices,
-                                           block_indices_begins,
-                                           past_lens,
-                                           cache_interval,
-                                           output_embeds,
-                                           batch_size_in_tokens,
-                                           hidden_size,
-                                           kernel_size,
-                                           num_blocks,
-                                           seq_count,
-                                           local_state.data());
+    auto dispatch_kernel = [&](auto* conv_state_table) {
+        kernels::paged_causal_conv1d_optimized(input_embeds,
+                                               conv_state_table,
+                                               conv_weight,
+                                               conv_bias,
+                                               has_bias,
+                                               subsequence_begins,
+                                               block_indices,
+                                               block_indices_begins,
+                                               past_lens,
+                                               cache_interval,
+                                               output_embeds,
+                                               batch_size_in_tokens,
+                                               hidden_size,
+                                               kernel_size,
+                                               num_blocks,
+                                               seq_count,
+                                               local_state.data());
+    };
+
+    if (state_precision == ov::element::f32) {
+        dispatch_kernel(static_cast<float*>(conv_state_raw));
+    } else if (state_precision == ov::element::f16) {
+        dispatch_kernel(static_cast<ov::float16*>(conv_state_raw));
+    } else if (state_precision == ov::element::bf16) {
+        dispatch_kernel(static_cast<ov::bfloat16*>(conv_state_raw));
+    } else {
+        OPENVINO_ASSERT(false,
+                        "PagedCausalConv1D: unsupported conv_state_table precision ",
+                        state_precision,
+                        ". Expected f32, f16, or bf16.");
+    }
 }
 
 }  // namespace ov::intel_cpu::node
