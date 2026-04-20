@@ -116,7 +116,7 @@ protected:
             assert(!params.is_dynamic());
             auto& wgs = kd.params.workGroups;
 
-            const auto& q_shape = params.get_input_layout(paged_gated_delta_net::QUERY).get_partial_shape();
+            // const auto& q_shape = params.get_input_layout(paged_gated_delta_net::QUERY).get_partial_shape();
             const auto& v_shape = params.get_input_layout(paged_gated_delta_net::VALUE).get_partial_shape();
             const auto& seq_shape = params.get_input_layout(paged_gated_delta_net::SUBSEQUENCE_BEGINS).get_partial_shape();
 
