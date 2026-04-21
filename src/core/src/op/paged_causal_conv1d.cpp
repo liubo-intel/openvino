@@ -9,6 +9,7 @@
 #include "paged_causal_conv1d_shape_inference.hpp"
 
 namespace {
+namespace paged_causal_conv1d_internal {
 
 inline void input_check(const ov::Node* node,
                         size_t idx,
@@ -35,7 +36,7 @@ inline void input_check(const ov::Node* node,
                           rank_check(rank),
                           "Rank of `",
                           input_name,
-                          "` input rank is not supported. Actual rank: ",
+                          "` input is not supported. Actual rank: ",
                           rank,
                           ".");
 
@@ -43,11 +44,12 @@ inline void input_check(const ov::Node* node,
                           type_check(tp),
                           "Element type of `",
                           input_name,
-                          "` input type is not supported. Actual type: ",
+                          "` input is not supported. Actual type: ",
                           tp,
                           ".");
 }
 
+}  // namespace paged_causal_conv1d_internal
 }  // namespace
 
 namespace ov::op::internal {
@@ -87,6 +89,7 @@ void PagedCausalConv1D::validate_and_infer_types() {
 
     const std::vector<ov::element::Type> float_types = {ov::element::f32, ov::element::f16, ov::element::bf16};
 
+    using paged_causal_conv1d_internal::input_check;
     input_check(this, 0, "input_embeds", {2}, float_types);
     input_check(this, 1, "conv_state_table", {3}, float_types);
     input_check(this, 2, "conv_weight", {3}, float_types);
