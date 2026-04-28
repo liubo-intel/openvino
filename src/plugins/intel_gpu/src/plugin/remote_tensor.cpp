@@ -367,6 +367,9 @@ void RemoteTensorImpl::allocate() {
         m_memory_object.reset();
     }
 
+    // Restore layout to the original shape after allocation with padded shape
+    m_layout.set_partial_shape(m_shape);
+
     update_properties();
     update_strides();
 

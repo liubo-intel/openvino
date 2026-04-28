@@ -385,7 +385,7 @@ void PagedCausalConv1DLayerTest::generate_inputs(const std::vector<ov::Shape>& t
 
         host_inputs[param] = tensor;
 
-        if (use_remote_tensors && i <= 3) {
+        if (use_remote_tensors && i <= 3 && tensor.get_size() > 0) {
             auto remote_tensor = remote_context.create_tensor(param->get_element_type(), shape);
             remote_tensor.copy_from(tensor);
             inputs[param] = remote_tensor;
