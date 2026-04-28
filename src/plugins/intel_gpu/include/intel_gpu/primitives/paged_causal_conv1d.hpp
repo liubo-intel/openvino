@@ -30,6 +30,11 @@ struct paged_causal_conv1d : public primitive_base<paged_causal_conv1d> {
         CACHE_INTERVAL = 8,
     };
 
+    enum ActivationType {
+        ACTIVATION_NONE = 0,
+        ACTIVATION_SWISH = 1,
+    };
+
     paged_causal_conv1d() : primitive_base("", {}) {}
 
     paged_causal_conv1d(const primitive_id& id, const std::vector<input_info>& inputs) : primitive_base(id, inputs) {
@@ -40,6 +45,7 @@ struct paged_causal_conv1d : public primitive_base<paged_causal_conv1d> {
         size_t seed = primitive::hash();
         seed = hash_combine(seed, hidden_size);
         seed = hash_combine(seed, kernel_size);
+        seed = hash_combine(seed, static_cast<size_t>(fused_activation));
         return seed;
     }
 
@@ -48,23 +54,28 @@ struct paged_causal_conv1d : public primitive_base<paged_causal_conv1d> {
             return false;
 
         auto rhs_casted = downcast<const paged_causal_conv1d>(rhs);
-        return hidden_size == rhs_casted.hidden_size && kernel_size == rhs_casted.kernel_size;
+        return hidden_size == rhs_casted.hidden_size && kernel_size == rhs_casted.kernel_size && fused_activation == rhs_casted.fused_activation;
     }
 
     void save(BinaryOutputBuffer& ob) const override {
         primitive_base<paged_causal_conv1d>::save(ob);
         ob << hidden_size;
         ob << kernel_size;
+        ob << static_cast<int32_t>(fused_activation);
     }
 
     void load(BinaryInputBuffer& ib) override {
         primitive_base<paged_causal_conv1d>::load(ib);
         ib >> hidden_size;
         ib >> kernel_size;
+        int32_t act;
+        ib >> act;
+        fused_activation = static_cast<ActivationType>(act);
     }
 
     size_t hidden_size = 0;
     size_t kernel_size = 0;
+    ActivationType fused_activation = ACTIVATION_NONE;
 };
 
 }  // namespace cldnn

@@ -94,6 +94,9 @@ KERNEL(paged_causal_conv1d_ref)
         }
 
         const int out_off = token_idx * output_token_stride + h * output_hidden_stride;
+#if HAS_SWISH
+        sum = sum / (1.0f + exp(-sum));
+#endif
         output_embeds[out_off] = TO_OUTPUT_TYPE(sum);
 
         const int cached_tokens = prev_nums + (t + 1);

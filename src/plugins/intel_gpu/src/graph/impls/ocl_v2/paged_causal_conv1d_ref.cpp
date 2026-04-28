@@ -24,9 +24,13 @@ protected:
         const auto& bias_shape = params.get_input_layout(paged_causal_conv1d::CONV_BIAS).get_partial_shape();
         const bool has_bias = bias_shape.rank().is_static() && bias_shape.size() == 1 && bias_shape[0].is_static() && bias_shape[0].get_length() != 0;
 
+        auto prim = params.typed_desc<paged_causal_conv1d>();
+        const bool has_swish = prim->fused_activation == paged_causal_conv1d::ACTIVATION_SWISH;
+
         jit.make("HIDDEN_SIZE", static_cast<int>(input_shape[1].get_length()));
         jit.make("KERNEL_SIZE", static_cast<int>(state_shape[2].get_length()));
         jit.make("HAS_BIAS", has_bias ? 1 : 0);
+        jit.make("HAS_SWISH", has_swish ? 1 : 0);
 
         return jit;
     }

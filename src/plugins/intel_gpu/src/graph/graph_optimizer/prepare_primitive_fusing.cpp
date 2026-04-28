@@ -39,6 +39,7 @@
 #include "cum_sum_inst.h"
 #include "embedding_bag_inst.h"
 #include "swiglu_inst.h"
+#include "paged_causal_conv1d_inst.h"
 #include "extract_image_patches_inst.h"
 #include "reduce_inst.h"
 #include "group_normalization_inst.h"
@@ -68,12 +69,14 @@ void prepare_primitive_fusing::run(program& p) {
             case 4:
                 fuse_swiglu(p); return;
             case 5:
-                fuse_bias(p); return;
+                fuse_paged_causal_conv1d_activation(p); return;
             case 6:
-                fuse_simple_primitives(p); return;
+                fuse_bias(p); return;
             case 7:
-                fuse_constant_transposes(p); return;
+                fuse_simple_primitives(p); return;
             case 8:
+                fuse_constant_transposes(p); return;
+            case 9:
                 optimize_fused_ops(p); return;
             default:
                 return;
@@ -83,6 +86,7 @@ void prepare_primitive_fusing::run(program& p) {
     fuse_reorders(p);
     remove_redundant_reshape(p);
     fuse_swiglu(p);
+    fuse_paged_causal_conv1d_activation(p);
     fuse_bias(p);
     fuse_simple_primitives(p);
     fuse_constant_transposes(p);
@@ -237,6 +241,54 @@ void prepare_primitive_fusing::fuse_swiglu(program &p) {
             GPU_DEBUG_TRACE_DETAIL << " - gate idx : " << swiglu_prim->gate_idx << std::endl;
             p.fuse_nodes(fc_node, *node, &fusing_history);
         }
+    }
+}
+
+void prepare_primitive_fusing::fuse_paged_causal_conv1d_activation(program &p) {
+    auto itr = p.get_processing_order().begin();
+    while (itr != p.get_processing_order().end()) {
+        auto node_itr = itr++;
+        auto& node = (*node_itr);
+
+        if (!node->is_type<paged_causal_conv1d>())
+            continue;
+
+        auto& conv_node = node->as<paged_causal_conv1d>();
+
+        if (conv_node.get_users().size() != 1)
+            continue;
+
+        auto* user = conv_node.get_users().front();
+
+        while (user->is_type<reshape>() && user->get_users().size() == 1 && !user->is_output()) {
+            user = user->get_users().front();
+        }
+
+        if (!user->is_type<activation>())
+            continue;
+
+        auto& act_node = user->as<activation>();
+        auto act_prim = act_node.get_primitive();
+
+        if (act_prim->activation_function != activation_func::swish)
+            continue;
+
+        if (act_node.get_dependencies().size() > 1)
+            continue;
+
+        GPU_DEBUG_TRACE_DETAIL << act_node.id() << " : fuse swish activation into " << conv_node.id() << std::endl;
+
+        auto act_id = act_node.id();
+        auto conv_id = conv_node.id();
+
+        auto prim = std::const_pointer_cast<paged_causal_conv1d>(conv_node.get_primitive());
+        prim->fused_activation = paged_causal_conv1d::ACTIVATION_SWISH;
+
+        if (itr != p.get_processing_order().end() && *itr == &act_node)
+            itr++;
+
+        p.extract_and_remove(act_node);
+        p.add_optimized_primitive_info(act_id, {conv_id});
     }
 }
 

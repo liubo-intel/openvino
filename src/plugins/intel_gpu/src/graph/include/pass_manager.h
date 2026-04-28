@@ -153,6 +153,7 @@ private:
     void run(program& p) override;
     void fuse_bias(program &p);
     void fuse_swiglu(program &p);
+    void fuse_paged_causal_conv1d_activation(program &p);
     void fuse_reorders(program& p);
     void fuse_simple_primitives(program &p);
     void fuse_constant_transposes(program &p);
