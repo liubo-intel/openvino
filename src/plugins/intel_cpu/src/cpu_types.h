@@ -135,6 +135,7 @@ enum class Type : uint8_t {
     CausalMaskPreprocess,
     LLMMLP,
     QKVProjection,
+    Gemma4PLEBlock,
     RMS,
     SearchSorted,
     SegmentMax,

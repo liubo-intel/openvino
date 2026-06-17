@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <set>
 #include <vector>
 
@@ -191,6 +192,7 @@
 #    include "low_precision/fold_convert.hpp"
 #    include "low_precision/fuse_convert.hpp"
 #    include "low_precision/weightable_layer_transformation.hpp"
+#    include "nodes/gemma4_ple_block.h"
 #    include "nodes/llm_mlp.h"
 #    include "nodes/qkv_proj.h"
 #    include "nodes/rms_norm.h"
@@ -208,6 +210,7 @@
 #    include "transformations/cpu_opset/common/pass/convert_fq_rnn_to_quantized_rnn.hpp"
 #    include "transformations/cpu_opset/common/pass/decompose_rms_norm.hpp"
 #    include "transformations/cpu_opset/x64/pass/convert_to_interaction.hpp"
+#    include "transformations/cpu_opset/x64/pass/gemma4_ple_fusion.hpp"
 #    include "transformations/cpu_opset/x64/pass/mlp_fusion.hpp"
 #    include "transformations/cpu_opset/x64/pass/qkv_proj_fusion.hpp"
 #    include "transformations/op_conversions/group_normalization_decomposition.hpp"
@@ -1178,6 +1181,20 @@ void Transformations::PostLpt() {
 #endif  // OPENVINO_ARCH_X86_64
 
     CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::RMSFusion, false);
+
+#if defined(OPENVINO_ARCH_X86_64)
+    if (can_use_amx_bf16_int8) {
+        CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::Gemma4PLEFusion);
+        CPU_SET_CALLBACK_X64(
+            postLPTPassManager,
+            [](const_node_ptr& node) -> bool {
+                std::string errorMsg;
+                return node::Gemma4PLEBlock::isSupportedOperation(node, errorMsg);
+            },
+            ov::intel_cpu::Gemma4PLEFusion);
+    }
+#endif
+
     CPU_REGISTER_PASS_X64(postLPTPassManager, ov::intel_cpu::DecomposeRMSNorm);
     CPU_SET_CALLBACK_X64(
         postLPTPassManager,

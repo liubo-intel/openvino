@@ -118,6 +118,7 @@
 #    include "nodes/fake_quantize.h"
 #    include "nodes/grid_sample.hpp"
 #    include "nodes/interaction.h"
+#    include "nodes/gemma4_ple_block.h"
 #    include "nodes/llm_mlp.h"
 #    include "nodes/paged_attn.h"
 #    include "nodes/qkv_proj.h"
@@ -256,6 +257,7 @@ Node::NodesFactory::NodesFactory() : Factory("NodesFactory") {
     INTEL_CPU_NODE(Interaction, Type::Interaction);
     INTEL_CPU_NODE(LLMMLP, Type::LLMMLP);
     INTEL_CPU_NODE(QKVProjection, Type::QKVProjection);
+    INTEL_CPU_NODE(Gemma4PLEBlock, Type::Gemma4PLEBlock);
     INTEL_CPU_NODE(PagedAttention, Type::PagedAttention);
     INTEL_CPU_NODE(RMSNorm, Type::RMS);
 #elif defined(OPENVINO_ARCH_ARM64)

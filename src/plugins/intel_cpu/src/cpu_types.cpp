@@ -260,6 +260,7 @@ static const TypeToNameMap& get_type_to_name_tbl() {
         {"EmbeddingBagOffsets", Type::EmbeddingBagOffsets},
         {"LLMMLP", Type::LLMMLP},
         {"QKVProjection", Type::QKVProjection},
+        {"Gemma4PLEBlock", Type::Gemma4PLEBlock},
         {"RMS", Type::RMS},
         {"SearchSorted", Type::SearchSorted},
         {"LoraSubgraph", Type::LoRA},
@@ -399,6 +400,7 @@ std::string NameFromType(const Type type) {
         CASE(CausalMaskPreprocess);
         CASE(LLMMLP);
         CASE(QKVProjection);
+        CASE(Gemma4PLEBlock);
         CASE(RMS);
         CASE(SearchSorted);
         CASE(SegmentMax);
