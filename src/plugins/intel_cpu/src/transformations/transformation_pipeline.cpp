@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <set>
@@ -1180,7 +1181,18 @@ void Transformations::PostLpt() {
     }
 #endif  // OPENVINO_ARCH_X86_64
 
-    CPU_REGISTER_PASS_X64(postLPTPassManager, ov::pass::RMSFusion, false);
+    {
+        // OV_RMS_BARE_FUSE=1 enables the new "bare RMS" pattern (no gamma, no trailing scale)
+        // needed for Gemma3 v_norm / L11 q_norm. Default 0 = baseline behavior (no new fusion).
+        const char* env = std::getenv("OV_RMS_BARE_FUSE");
+        const bool enable_bare = (env && std::string(env) == "1");
+        CPU_REGISTER_PASS_X64(postLPTPassManager,
+                              ov::pass::RMSFusion,
+                              /*force_tail_convert=*/false,
+                              /*enable_div_x=*/false,
+                              /*enable_without_gamma=*/false,
+                              /*enable_bare_no_gamma=*/enable_bare);
+    }
 
 #if defined(OPENVINO_ARCH_X86_64)
     if (can_use_amx_bf16_int8) {

@@ -27,7 +27,10 @@ namespace op_util = ov::op::util;
 
 namespace ov::pass {
 
-RMSFusion::RMSFusion(bool force_tail_convert, bool enable_div_x, bool enable_without_gamma) {
+RMSFusion::RMSFusion(bool force_tail_convert,
+                     bool enable_div_x,
+                     bool enable_without_gamma,
+                     bool enable_bare_no_gamma) {
     // Detect RMS decomposition pattern
     //  x * 1/Sqrt(ReduceMean(x^2,axes)+eps) * gamma
     auto x = pattern::any_input();
@@ -93,17 +96,22 @@ RMSFusion::RMSFusion(bool force_tail_convert, bool enable_div_x, bool enable_wit
     auto gamma_convert = pattern::optional<v0::Convert>(gamma);
     auto mul_with_gamma = pattern::wrap_type<v1::Multiply>({gamma_convert, mul_or_div});
 
-    std::shared_ptr<ov::Node> rms_mul;
+    OutputVector rms_mul_branches{mul_with_gamma};
     if (enable_without_gamma) {
         // Pattern 2: RMS without gamma, but multiplied with dynamic input
         // RMS(x) * scale where scale is non-constant (e.g., gate, activation, residual)
         // This allows partial fusion: only fuse up to mul_or_div
         auto scale = pattern::any_input(pattern::class_other_than<v0::Constant>());
         auto mul_with_scale = pattern::wrap_type<v1::Multiply>({mul_or_div, scale});
-        rms_mul = std::make_shared<pattern::op::Or>(OutputVector{mul_with_gamma, mul_with_scale});
-    } else {
-        rms_mul = mul_with_gamma;
+        rms_mul_branches.push_back(mul_with_scale);
     }
+    if (enable_bare_no_gamma) {
+        // Pattern 3: bare RMS without gamma and without trailing scale multiply
+        // x * 1/Sqrt(ReduceMean(x^2,axes)+eps) standing alone (e.g., Gemma3 v_norm with with_scale=False)
+        rms_mul_branches.emplace_back(mul_or_div->output(0));
+    }
+    std::shared_ptr<ov::Node> rms_mul =
+        rms_mul_branches.size() == 1 ? mul_with_gamma : std::make_shared<pattern::op::Or>(rms_mul_branches);
 
     std::shared_ptr<ov::Node> comp = rms_mul;
     if (force_tail_convert) {
@@ -128,6 +136,27 @@ RMSFusion::RMSFusion(bool force_tail_convert, bool enable_div_x, bool enable_wit
 
         auto mul_or_div_node = pattern_map.at(mul_or_div).get_node_shared_ptr();
         bool elementwise_affine = pattern_map.count(mul_with_gamma);
+        bool match_root_is_mul_or_div = (node.get() == mul_or_div_node.get());
+
+        // When the match root is bare mul_or_div (no gamma, no scale), defer if any
+        // consumer is a Multiply by a Constant: that consumer should be handled by the
+        // gamma-pattern variant of this same matcher pass on a subsequent node visit.
+        if (match_root_is_mul_or_div) {
+            for (const auto& target : mul_or_div_node->get_output_target_inputs(0)) {
+                auto consumer = target.get_node()->shared_from_this();
+                if (ov::is_type<v1::Multiply>(consumer)) {
+                    auto a = consumer->get_input_node_shared_ptr(0);
+                    auto b = consumer->get_input_node_shared_ptr(1);
+                    auto strip_convert = [](const std::shared_ptr<ov::Node>& n) {
+                        return ov::is_type<v0::Convert>(n) ? n->get_input_node_shared_ptr(0) : n;
+                    };
+                    if (ov::is_type<v0::Constant>(strip_convert(a)) ||
+                        ov::is_type<v0::Constant>(strip_convert(b))) {
+                        return false;
+                    }
+                }
+            }
+        }
 
         std::shared_ptr<ov::Node> gamma_node;
         if (elementwise_affine) {
@@ -149,10 +178,22 @@ RMSFusion::RMSFusion(bool force_tail_convert, bool enable_div_x, bool enable_wit
 
         auto output_type = elementwise_affine ? m.get_match_root()->get_output_element_type(0)
                                               : mul_or_div_node->get_output_element_type(0);
-        std::shared_ptr<ov::op::internal::RMS> rms =
-            elementwise_affine ? std::make_shared<ov::op::internal::RMS>(x_output, gamma_node, eps_value, output_type)
-                               : std::make_shared<ov::op::internal::RMS>(x_output, eps_value, output_type);
+        std::shared_ptr<ov::op::internal::RMS> rms;
         if (elementwise_affine) {
+            rms = std::make_shared<ov::op::internal::RMS>(x_output, gamma_node, eps_value, output_type);
+        } else {
+            // Synthesize a unit gamma so downstream consumers (CPU RMSNorm node /
+            // DecomposeRMSNorm fallback) that expect 2 inputs keep working.
+            auto unit_gamma = v0::Constant::create(output_type, ov::Shape{1}, {1.0f});
+            rms = std::make_shared<ov::op::internal::RMS>(x_output, unit_gamma, eps_value, output_type);
+            rms->set_elementwise_affine(false);
+        }
+        if (match_root_is_mul_or_div) {
+            // Pattern 3: bare mul_or_div (no gamma multiply, no scale multiply).
+            rms->set_friendly_name(mul_or_div_node->get_friendly_name());
+            ov::copy_runtime_info(m.get_matched_nodes(), rms);
+            ov::replace_node(mul_or_div_node, rms);
+        } else if (elementwise_affine) {
             rms->set_friendly_name(m.get_match_root()->get_friendly_name());
             ov::copy_runtime_info(m.get_matched_nodes(), rms);
             ov::replace_node(m.get_match_root(), rms);
