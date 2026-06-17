@@ -38,6 +38,9 @@ public:
         int hidden_size;        // e.g. 1536
         int hidden_per_layer;   // e.g. 256
         float eps;              // RMSNorm epsilon
+        // Per-layer LayerScale scalar (Gemma4 layer_scalar). 1.0 means no extra scaling.
+        // Folded into the epi2 JIT pipe so it costs 0 extra DRAM traffic.
+        float layer_scalar = 1.0F;
     };
 
     Gemma4PLEBlockNode(const OutputVector& args, const Config& cfg) : Op(args), m_config(cfg) {

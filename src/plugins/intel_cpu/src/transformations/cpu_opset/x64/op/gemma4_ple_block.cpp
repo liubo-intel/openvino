@@ -20,6 +20,7 @@ bool Gemma4PLEBlockNode::visit_attributes(ov::AttributeVisitor& visitor) {
     visitor.on_attribute("hidden_size", m_config.hidden_size);
     visitor.on_attribute("hidden_per_layer", m_config.hidden_per_layer);
     visitor.on_attribute("eps", m_config.eps);
+    visitor.on_attribute("layer_scalar", m_config.layer_scalar);
     visitor.finish_structure();
     return true;
 }

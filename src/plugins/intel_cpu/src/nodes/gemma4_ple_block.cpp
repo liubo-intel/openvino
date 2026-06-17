@@ -179,7 +179,9 @@ public:
 
 // JIT epi2 kernel for one row at a time:
 //   inv_rms = 1 / sqrt( sum(p^2) / H + eps )
-//   out_bf16[c] = ConvertFp32toBf16( residual_bf16[c] + p[c] * inv_rms * gamma[c] )
+//   out_bf16[c] = ConvertFp32toBf16( layer_scalar * (residual_bf16[c] + p[c] * inv_rms * gamma[c]) )
+// Note: layer_scalar (Gemma4 per-layer LayerScale) is folded into the same f32 ZMM pipe so it
+// costs one extra vmulps per 16 elements with no additional load/store.
 class RmsResidualBf16Kernel : public dnnl::impl::cpu::x64::jit_generator_t {
 public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(RmsResidualBf16Kernel)
@@ -191,6 +193,7 @@ public:
         int16_t* dst;              // bf16 [cols]
         float inv_h;               // 1.0 / H
         float eps;
+        float layer_scalar;        // per-layer LayerScale (defaults to 1.0)
         int64_t cols;
     };
 
@@ -306,7 +309,12 @@ public:
         const Zmm zmm_inv = zmm8;
         vbroadcastss(zmm_inv, xmm_acc0);
 
-        // Pass 2: out = bf16( residual + p * inv_rms * gamma ), 16 elements per iteration
+        // broadcast layer_scalar into a zmm once (constant for all 16-element iterations)
+        const Zmm zmm_scale = zmm9;
+        vbroadcastss(zmm_scale, ptr[reg_args + offsetof(CallArgs, layer_scalar)]);
+
+        // Pass 2: out = bf16( layer_scalar * (residual + p * inv_rms * gamma) ),
+        //         16 elements per iteration
         Label out_loop, out_done;
         xor_(reg_col, reg_col);
         align(64);
@@ -323,6 +331,8 @@ public:
             vpmovzxwd(zmm_v2, ptr[reg_res + reg_col * 2]);
             vpslld(zmm_v2, zmm_v2, 16);
             vaddps(zmm_v0, zmm_v0, zmm_v2);
+            // fold the trailing per-layer LayerScale into the same f32 pipe (free vs DRAM round-trip)
+            vmulps(zmm_v0, zmm_v0, zmm_scale);
             // store as bf16
             vcvtneps2bf16(ymm4, zmm_v0);
             vmovups(ptr[reg_dst + reg_col * 2], ymm4);
@@ -344,6 +354,7 @@ public:
               ov::bfloat16* dst,
               float inv_h,
               float eps,
+              float layer_scalar,
               size_t cols) const {
         CallArgs args{};
         args.p = p;
@@ -352,6 +363,7 @@ public:
         args.dst = reinterpret_cast<int16_t*>(dst);
         args.inv_h = inv_h;
         args.eps = eps;
+        args.layer_scalar = layer_scalar;
         args.cols = static_cast<int64_t>(cols);
         (*this)(&args);
     }
@@ -709,10 +721,11 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
         });
     }
 
-    // Pass 4: per-row RMSNorm + residual + cast to bf16 (JIT).
+    // Pass 4: per-row RMSNorm + residual + LayerScale + cast to bf16 (JIT).
     {
         ScopedTimer _t(s_trace, PleTrace::EPI2);
         const float inv_h = 1.0f / static_cast<float>(H);
+        const float layer_scalar = m_config.layer_scalar;
         const auto* rms_combine = m_rms_combine.get();
         parallel_for(M, [&](size_t m) {
             rms_combine->call(m_C_proj.data() + m * Hu,
@@ -721,6 +734,7 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
                               out_bf + m * Hu,
                               inv_h,
                               eps,
+                              layer_scalar,
                               Hu);
         });
     }

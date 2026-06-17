@@ -5,7 +5,9 @@
 #include "gemma4_ple_fusion.hpp"
 
 #include <cstdlib>
+#include <functional>
 #include <memory>
+#include <numeric>
 
 #include "openvino/cc/pass/itt.hpp"
 #include "openvino/core/graph_util.hpp"
@@ -65,7 +67,10 @@ ov::intel_cpu::Gemma4PLEFusion::Gemma4PLEFusion() {
     auto norm_gamma = any_input();
     auto rms = wrap_type<ov::op::internal::RMS>({proj_matmul, norm_gamma});
 
-    // residual + RMS output
+    // residual + RMS output. The optional trailing per-layer LayerScale Multiply is detected
+    // manually in the callback: if we encoded it as a second `Or` branch, the matcher would fire
+    // on Add first (topo order) and replace it before Multiply is visited, leaving the LayerScale
+    // un-fused. Peeking at the consumer side of Add lets us absorb both nodes atomically.
     auto add_out = wrap_type<Add>({input, rms}, {{"auto_broadcast", "numpy"}});
 
     matcher_pass_callback callback = [=](Matcher& m) {
@@ -124,6 +129,50 @@ ov::intel_cpu::Gemma4PLEFusion::Gemma4PLEFusion() {
         cfg.hidden_size = hidden_size;
         cfg.hidden_per_layer = hidden_per_layer;
         cfg.eps = static_cast<float>(rms_node->get_epsilon());
+        cfg.layer_scalar = 1.0F;
+
+        // Peek at Add's consumer chain for an optional `* layer_scalar`. PyTorch export emits
+        //   Add -> Multiply(Add, Constant<f16>[1,1,1] -> Convert<f32>)
+        // for `hidden_states *= self.layer_scalar`. If that exact pattern is the *only* consumer,
+        // fold the scalar into the fused op and replace both Add and Multiply.
+        std::shared_ptr<ov::Node> scale_mul;
+        const auto add_node = root;
+        if (add_node->get_output_size() == 1 && add_node->output(0).get_target_inputs().size() == 1) {
+            auto consumer = add_node->output(0).get_target_inputs().begin()->get_node();
+            auto* mul = ov::as_type<Multiply>(consumer);
+            if (mul) {
+                // Find the operand that is *not* `add_out`.
+                ov::Output<ov::Node> scale_op;
+                bool first_is_add = (mul->input_value(0).get_node_shared_ptr() == add_node);
+                bool second_is_add = (mul->input_value(1).get_node_shared_ptr() == add_node);
+                if (first_is_add ^ second_is_add) {
+                    scale_op = first_is_add ? mul->input_value(1) : mul->input_value(0);
+                    auto scale_node = scale_op.get_node_shared_ptr();
+                    // Walk through optional Convert(f32).
+                    if (auto cvt = ov::as_type_ptr<Convert>(scale_node)) {
+                        if (cvt->get_destination_type() == ov::element::f32) {
+                            scale_node = cvt->input_value(0).get_node_shared_ptr();
+                        }
+                    }
+                    auto scale_const = ov::as_type_ptr<Constant>(scale_node);
+                    if (scale_const && (scale_const->get_element_type() == ov::element::f32 ||
+                                        scale_const->get_element_type() == ov::element::f16)) {
+                        const auto& scalar_shape = scale_const->get_shape();
+                        const size_t scalar_count = std::accumulate(scalar_shape.begin(),
+                                                                    scalar_shape.end(),
+                                                                    size_t{1},
+                                                                    std::multiplies<size_t>());
+                        if (scalar_count == 1) {
+                            const auto values = scale_const->cast_vector<float>();
+                            if (values.size() == 1) {
+                                cfg.layer_scalar = values[0];
+                                scale_mul = consumer->shared_from_this();
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         ov::OutputVector new_args{
             pm.at(input),
@@ -134,15 +183,22 @@ ov::intel_cpu::Gemma4PLEFusion::Gemma4PLEFusion() {
         };
 
         auto new_node = std::make_shared<Gemma4PLEBlockNode>(new_args, cfg);
-        new_node->set_friendly_name(root->get_friendly_name());
-        ov::copy_runtime_info(m.get_matched_nodes(), new_node);
+        // Friendly name follows the outermost replaced node so downstream RT info stays predictable.
+        auto outer = scale_mul ? scale_mul : root;
+        new_node->set_friendly_name(outer->get_friendly_name());
+
+        ov::NodeVector replaced_nodes = m.get_matched_nodes();
+        if (scale_mul) {
+            replaced_nodes.push_back(scale_mul);
+        }
+        ov::copy_runtime_info(replaced_nodes, new_node);
 
         // Plugin support gate.
         if (!transformation_callback(new_node)) {
             return false;
         }
 
-        ov::replace_node(root, new_node);
+        ov::replace_node(outer, new_node);
         return true;
     };
 
