@@ -17,12 +17,13 @@
 #include "openvino/core/node.hpp"
 #include "openvino/core/type/bfloat16.hpp"
 #include "transformations/cpu_opset/x64/op/gemma4_ple_block.hpp"
+#include "utils/plain_tensor.hpp"
 
 namespace ov::intel_cpu {
 class BrgemmKernel;
 class GateMulCombineKernel;
 class RmsResidualBf16Kernel;
-}
+}  // namespace ov::intel_cpu
 
 namespace ov::intel_cpu::node {
 
@@ -52,7 +53,7 @@ private:
     // bf16-decompressed weights (kept for re-packing if needed).
     std::vector<ov::bfloat16> m_gate_w_bf16;  // [Hp, H]
     std::vector<ov::bfloat16> m_proj_w_bf16;  // [H, Hp]
-    std::vector<float> m_norm_gamma_f32;      // [H]
+    PlainTensor m_norm_gamma_f32;             // f32 [H]
 
     // Per N-shard packed weights. Each shard is [N_shard, K] packed via copy_buffer_b.
     // Stage1 sharded along Hp; Stage2 sharded along H.
@@ -62,9 +63,9 @@ private:
     size_t m_proj_shard_bytes = 0;
     bool m_weights_packed = false;
 
-    // Shared workspace for one execute() call (resized lazily).
-    std::vector<ov::bfloat16> m_gated_bf;   // [M, Hp] -- only intermediate that lands in DRAM
-    std::vector<float> m_C_proj;            // [M, H] (still f32, fed into JIT epi2)
+    // Shared workspace for one execute() call (resized lazily, monotonic grow).
+    PlainTensor m_gated_bf;  // bf16 [M, Hp] -- only intermediate that lands in DRAM
+    PlainTensor m_C_proj;    // f32  [M, H]  (fed into JIT epi2)
 
     // Per-thread brgemm scratch + small f32 staging tile (kept hot in L1/L2).
     std::vector<uint8_t> m_thread_wsp;
@@ -83,8 +84,8 @@ private:
     std::unordered_map<size_t, std::shared_ptr<BrgemmKernel>> m_gemm1_cache;
     std::unordered_map<size_t, std::shared_ptr<BrgemmKernel>> m_gemm2_cache;
 
-    static constexpr size_t kMblk = 32;     // matches BrgemmKernel::matmulOptimalM
-    static constexpr size_t kNshard = 32;   // columns per parallel N-shard
+    static constexpr size_t kMblk = 32;    // matches BrgemmKernel::matmulOptimalM
+    static constexpr size_t kNshard = 32;  // columns per parallel N-shard
 };
 
 }  // namespace ov::intel_cpu::node

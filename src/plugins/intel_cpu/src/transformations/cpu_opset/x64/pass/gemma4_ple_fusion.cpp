@@ -63,8 +63,10 @@ ov::intel_cpu::Gemma4PLEFusion::Gemma4PLEFusion() {
     auto proj_w_f32 = wrap_type<Convert>({proj_w_compressed}, {{"destination_type", "f32"}});
     auto proj_matmul = wrap_type<MatMul>({gated, proj_w_f32}, {{"transpose_a", false}, {"transpose_b", true}});
 
-    // post_per_layer_input_norm: RMS internal op (already fused)
-    auto norm_gamma = any_input();
+    // post_per_layer_input_norm: RMS internal op (already fused).
+    // gamma must be an f32 constant: the JIT epi2 kernel reads it directly as f32 from the
+    // packed `m_norm_gamma_f32` buffer prepared in createPrimitive().
+    auto norm_gamma = wrap_type<Constant>(type_matches(ov::element::f32));
     auto rms = wrap_type<ov::op::internal::RMS>({proj_matmul, norm_gamma});
 
     // residual + RMS output. The optional trailing per-layer LayerScale Multiply is detected
@@ -116,12 +118,20 @@ ov::intel_cpu::Gemma4PLEFusion::Gemma4PLEFusion() {
         const int hidden_per_layer = static_cast<int>(pli_last.get_length());
 
         // Sanity: weight shapes must match the deduced dimensions.
-        if (static_cast<int>(gate_shape[0]) != hidden_per_layer ||
-            static_cast<int>(gate_shape[1]) != hidden_size) {
+        if (static_cast<int>(gate_shape[0]) != hidden_per_layer || static_cast<int>(gate_shape[1]) != hidden_size) {
             return false;
         }
-        if (static_cast<int>(proj_shape[0]) != hidden_size ||
-            static_cast<int>(proj_shape[1]) != hidden_per_layer) {
+        if (static_cast<int>(proj_shape[0]) != hidden_size || static_cast<int>(proj_shape[1]) != hidden_per_layer) {
+            return false;
+        }
+
+        // The fused kernel shards N along a fixed `kNshard = 32` tile and reuses one BRGEMM
+        // instance for every shard. There is no N-tail path: shards are not allowed to be
+        // partial. Reject any geometry where H or Hp is not a multiple of 32 so we fall
+        // back to the original RMS+MatMul+Gelu subgraph instead of throwing later in
+        // Gemma4PLEBlock::createPrimitive().
+        constexpr int kNshard = 32;
+        if (hidden_size % kNshard != 0 || hidden_per_layer % kNshard != 0) {
             return false;
         }
 

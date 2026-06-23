@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <oneapi/dnnl/dnnl_common.hpp>
@@ -47,11 +48,11 @@ public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(GateMulCombineKernel)
 
     struct CallArgs {
-        const float* gate;      // f32 [rows, cols], stride = gate_stride
-        const int16_t* pli;     // bf16 [rows, cols], stride = pli_stride
-        int16_t* dst;           // bf16 [rows, cols], stride = pli_stride
-        int64_t gate_stride;    // in floats
-        int64_t pli_stride;     // in bf16 elements
+        const float* gate;    // f32 [rows, cols], stride = gate_stride
+        const int16_t* pli;   // bf16 [rows, cols], stride = pli_stride
+        int16_t* dst;         // bf16 [rows, cols], stride = pli_stride
+        int64_t gate_stride;  // in floats
+        int64_t pli_stride;   // in bf16 elements
         int64_t rows;
         int64_t cols;
     };
@@ -74,27 +75,25 @@ public:
         Reg64 reg_cols = r14;
         Reg64 reg_col = rax;
 
-        auto injector = std::make_shared<jit_uni_eltwise_injector_t<avx512_core>>(
-            this,
-            dnnl_eltwise_gelu_tanh,
-            0.F,
-            0.F,
-            1.F,
-            dnnl::impl::data_type::f32,
-            true,            // save_state
-            Reg64(Operand::R15),
-            Opmask(1),
-            true,            // is_fwd
-            false,           // use_dst
-            false,           // preserve_vmm
-            false);          // preserve_p_table
+        auto injector = std::make_shared<jit_uni_eltwise_injector_t<avx512_core>>(this,
+                                                                                  dnnl_eltwise_gelu_tanh,
+                                                                                  0.F,
+                                                                                  0.F,
+                                                                                  1.F,
+                                                                                  dnnl::impl::data_type::f32,
+                                                                                  true,  // save_state
+                                                                                  Reg64(Operand::R15),
+                                                                                  Opmask(1),
+                                                                                  true,    // is_fwd
+                                                                                  false,   // use_dst
+                                                                                  false,   // preserve_vmm
+                                                                                  false);  // preserve_p_table
 
         // Preserve callee-saved regs we clobber.
         push(r12);
         push(r13);
         push(r14);
         push(r15);
-        push(rbx);  // align stack to 16
 
         mov(reg_gate, ptr[reg_args + offsetof(CallArgs, gate)]);
         mov(reg_pli, ptr[reg_args + offsetof(CallArgs, pli)]);
@@ -148,7 +147,6 @@ public:
         }
         L(row_end);
 
-        pop(rbx);
         pop(r15);
         pop(r14);
         pop(r13);
@@ -187,13 +185,13 @@ public:
     DECLARE_CPU_JIT_AUX_FUNCTIONS(RmsResidualBf16Kernel)
 
     struct CallArgs {
-        const float* p;            // f32 [cols]
-        const float* gamma;        // f32 [cols]
-        const int16_t* residual;   // bf16 [cols]
-        int16_t* dst;              // bf16 [cols]
-        float inv_h;               // 1.0 / H
+        const float* p;           // f32 [cols]
+        const float* gamma;       // f32 [cols]
+        const int16_t* residual;  // bf16 [cols]
+        int16_t* dst;             // bf16 [cols]
+        float inv_h;              // 1.0 / H
         float eps;
-        float layer_scalar;        // per-layer LayerScale (defaults to 1.0)
+        float layer_scalar;  // per-layer LayerScale (defaults to 1.0)
         int64_t cols;
     };
 
@@ -214,9 +212,7 @@ public:
         Reg64 reg_col = rax;
         Reg64 reg_tmp = rdx;
 
-        push(rbx);
         push(r12);
-        push(r13);
 
         mov(reg_p, ptr[reg_args + offsetof(CallArgs, p)]);
         mov(reg_gamma, ptr[reg_args + offsetof(CallArgs, gamma)]);
@@ -342,9 +338,7 @@ public:
         }
         L(out_done);
 
-        pop(r13);
         pop(r12);
-        pop(rbx);
         ret();
     }
 
@@ -373,6 +367,9 @@ public:
 
 namespace ov::intel_cpu::node {
 
+// TODO: remove before upstream PR.
+// gelu_tanh() standalone is unused (JIT epi1 uses OneDNN eltwise_injector).
+// PleTrace / ScopedTimer is debug-only instrumentation gated by GEMMA4_PLE_TRACE env.
 namespace {
 
 inline float gelu_tanh(float x) {
@@ -410,10 +407,8 @@ struct PleTrace {
             return cnt ? (s / cnt) : 0;
         };
         std::cerr << "[Gemma4PLE trace] " << tag << " M=" << M << " calls=" << c
-                  << " avg_us: gemm1=" << (avg(GEMM1) / 1000.0)
-                  << " epi1=" << (avg(EPI1) / 1000.0)
-                  << " gemm2=" << (avg(GEMM2) / 1000.0)
-                  << " epi2=" << (avg(EPI2) / 1000.0) << std::endl;
+                  << " avg_us: gemm1=" << (avg(GEMM1) / 1000.0) << " epi1=" << (avg(EPI1) / 1000.0)
+                  << " gemm2=" << (avg(GEMM2) / 1000.0) << " epi2=" << (avg(EPI2) / 1000.0) << std::endl;
     }
 };
 // Zero-overhead when GEMMA4_PLE_TRACE is unset: clock_now() is only called when enabled.
@@ -466,11 +461,11 @@ void Gemma4PLEBlock::initSupportedPrimitiveDescriptors() {
     std::vector<PortConfigurator> inPortConfigs;
     std::vector<PortConfigurator> outPortConfigs;
 
-    inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(0), false, -1);          // input
-    inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(1), false, -1);          // per_layer_input
-    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f16, getInputShapeAtPort(2), false, -1);     // gate_w
-    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f16, getInputShapeAtPort(3), false, -1);     // proj_w
-    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f32, getInputShapeAtPort(4), false, -1);     // norm_gamma
+    inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(0), false, -1);  // input
+    inPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getInputShapeAtPort(1), false, -1);  // per_layer_input
+    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f16, getInputShapeAtPort(2), false, -1);  // gate_w
+    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f16, getInputShapeAtPort(3), false, -1);  // proj_w
+    inPortConfigs.emplace_back(LayoutType::ncsp, ov::element::f32, getInputShapeAtPort(4), false, -1);  // norm_gamma
 
     outPortConfigs.emplace_back(LayoutType::ncsp, rtPrecision, getOutputShapeAtPort(0), false, -1);
 
@@ -483,10 +478,20 @@ void Gemma4PLEBlock::createPrimitive() {
     const int Hp = m_config.hidden_per_layer;
     const size_t Hu = static_cast<size_t>(H);
     const size_t Hpu = static_cast<size_t>(Hp);
-    OPENVINO_ASSERT(Hpu % kNshard == 0,
-                    "Gemma4PLEBlock requires Hp divisible by ", kNshard, " (got Hp=", Hp, ")");
-    OPENVINO_ASSERT(Hu % kNshard == 0,
-                    "Gemma4PLEBlock requires H divisible by ", kNshard, " (got H=", H, ")");
+    OPENVINO_ASSERT(Hpu % kNshard == 0, "Gemma4PLEBlock requires Hp divisible by ", kNshard, " (got Hp=", Hp, ")");
+    OPENVINO_ASSERT(Hu % kNshard == 0, "Gemma4PLEBlock requires H divisible by ", kNshard, " (got H=", H, ")");
+
+    // Cross-component contract: the per-thread f32 staging tile in execute() is sized as
+    // kMblk * kNshard * sizeof(float), and the one-shot packing kernels below are
+    // constructed with M=kMblk. Both assume kMblk equals the BRGEMM main M-block size.
+    // If BrgemmKernel ever changes its internal block size we want to fail fast here
+    // (once per node lifetime, zero hot-path cost) rather than silently corrupt the
+    // staging tile at runtime.
+    OPENVINO_ASSERT(BrgemmKernel::get_mblk_size() == kMblk,
+                    "Gemma4PLEBlock assumes BrgemmKernel main M-block size == kMblk (",
+                    kMblk,
+                    "), got ",
+                    BrgemmKernel::get_mblk_size());
 
     auto gate_mem = getSrcMemoryAtPort(2);
     auto proj_mem = getSrcMemoryAtPort(3);
@@ -505,7 +510,8 @@ void Gemma4PLEBlock::createPrimitive() {
 
     m_gate_w_bf16.resize(Hpu * Hu);
     m_proj_w_bf16.resize(Hu * Hpu);
-    m_norm_gamma_f32.assign(gamma_f32, gamma_f32 + H);
+    m_norm_gamma_f32.resize<float>({Hu});
+    std::memcpy(m_norm_gamma_f32.ptr<float>(0), gamma_f32, Hu * sizeof(float));
 
     parallel_for(Hpu * Hu, [&](size_t i) {
         m_gate_w_bf16[i] = static_cast<ov::bfloat16>(static_cast<float>(gate_f16[i]));
@@ -582,8 +588,7 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
     OPENVINO_ASSERT(static_cast<int>(in_dims[2]) == H, "Gemma4PLEBlock input last dim mismatch");
 
     const auto& pli_dims = pli_mem->getStaticDims();
-    OPENVINO_ASSERT(pli_dims.size() == 3 && pli_dims[0] == B && pli_dims[1] == T &&
-                        static_cast<int>(pli_dims[2]) == Hp,
+    OPENVINO_ASSERT(pli_dims.size() == 3 && pli_dims[0] == B && pli_dims[1] == T && static_cast<int>(pli_dims[2]) == Hp,
                     "Gemma4PLEBlock per_layer_input shape mismatch");
 
     const auto* in_bf = in_mem->getDataAs<ov::bfloat16>();
@@ -630,14 +635,14 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
 
     // Workspace allocation (lazy / monotonic grow). m_C_gate is gone -- gemm1 output now
     // lives in a per-thread staging tile that stays hot in L1.
-    if (m_gated_bf.size() < M * Hpu) {
-        m_gated_bf.assign(M * Hpu, ov::bfloat16(0));
-    }
-    if (m_C_proj.size() < M * Hu) {
-        m_C_proj.assign(M * Hu, 0.0f);
-    }
+    // PlainTensor::resize() only re-allocates when capacity grows; both buffers are fully
+    // overwritten before being read in this same execute() call, so no zero-init is needed.
+    m_gated_bf.resize<ov::bfloat16>({M, Hpu});
+    m_C_proj.resize<float>({M, Hu});
 
-    auto round_up_64 = [](size_t v) { return (v + 63) & ~size_t(63); };
+    auto round_up_64 = [](size_t v) {
+        return (v + 63) & ~size_t(63);
+    };
     const size_t wsp_per = round_up_64(BrgemmKernel::get_wsp_size());
     const size_t scratchA_per = round_up_64(std::max(gemm1->get_scratch_a_size(), gemm2->get_scratch_a_size()));
     const size_t stage_per = round_up_64(kMblk * kNshard * sizeof(float));  // 4 KB, already 64-aligned
@@ -692,7 +697,7 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
                                /*gate_stride=*/kNshard,
                                pli_bf + m_start * Hpu + n0,
                                /*pli_stride=*/Hpu,
-                               m_gated_bf.data() + m_start * Hpu + n0,
+                               m_gated_bf.ptr<ov::bfloat16>(m_start, n0),
                                m_rows,
                                kNshard);
         });
@@ -711,9 +716,9 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
 
             const size_t n0 = ns * kNshard;
             gemm2->executeGemm(is_tail,
-                               m_gated_bf.data() + m_start * Hpu,
+                               m_gated_bf.ptr<ov::bfloat16>(m_start, 0),
                                m_packed_proj_w.data() + ns * m_proj_shard_bytes,
-                               m_C_proj.data() + m_start * Hu + n0,
+                               m_C_proj.ptr<float>(m_start, n0),
                                nullptr,
                                nullptr,
                                wsp,
@@ -728,8 +733,8 @@ void Gemma4PLEBlock::execute([[maybe_unused]] const dnnl::stream& strm) {
         const float layer_scalar = m_config.layer_scalar;
         const auto* rms_combine = m_rms_combine.get();
         parallel_for(M, [&](size_t m) {
-            rms_combine->call(m_C_proj.data() + m * Hu,
-                              m_norm_gamma_f32.data(),
+            rms_combine->call(m_C_proj.ptr<float>(m, 0),
+                              m_norm_gamma_f32.ptr<float>(0),
                               in_bf + m * Hu,
                               out_bf + m * Hu,
                               inv_h,
