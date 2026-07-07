@@ -98,10 +98,14 @@ ov::element::TypeVector FullyConnected::getSupportedCompressedActivationsTypes()
     // dynamic-quant kernels. On AMX-capable HW, AMX BF16 TMUL outperforms
     // VNNI int8 on prefill, so keep f32 here and let the existing AMX BF16
     // path handle bf16 inference precision.
+    // f16 / bf16 are listed here so the FCC pattern can match fp8-weights cases
+    // with non-f32 inferencePrecision; isSupportedCompressedOperation gates the
+    // actual conversion per wei dtype, preserving the AMX dyn-quant exclusion
+    // for u8 / i4 / nf4 / ... (i.e. those paths still see {f32} only).
     if (dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_amx)) {
-        return {Type_t::f32};
+        return {Type_t::f32, Type_t::f16, Type_t::bf16};
     }
-    return {Type_t::f32, Type_t::bf16};
+    return {Type_t::f32, Type_t::bf16, Type_t::f16};
 #elif defined(OV_CPU_WITH_KLEIDIAI)
     return {Type_t::f32};
 #else
@@ -153,6 +157,21 @@ bool FullyConnected::isSupportedCompressedOperation([[maybe_unused]] const std::
         }
 
         if (!dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx2)) {
+            return false;
+        }
+
+        // FCC activation type set was widened to {f32, f16, bf16} on AMX so that
+        // fp8 weights can match the FCC pattern under inferencePrecision=f16/bf16.
+        // For non-fp8 weights (u8/i4/nf4/...) the original AMX-bf16 / AMX-f16
+        // exclusion must still hold: those weight-decompression cases want the
+        // standard inner_product AMX TMUL path, not the SIMD dyn-quant path.
+        const auto wei_dt = op->get_input_element_type(WEIGHTS);
+        const bool is_fp8_wei =
+            wei_dt == ov::element::f8e4m3 || wei_dt == ov::element::f8e5m2;
+        if (!is_fp8_wei &&
+            dnnl::impl::cpu::x64::mayiuse(dnnl::impl::cpu::x64::avx512_core_amx) &&
+            (config.inferencePrecision == ov::element::f16 ||
+             config.inferencePrecision == ov::element::bf16)) {
             return false;
         }
 

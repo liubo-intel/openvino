@@ -514,7 +514,7 @@ bool DnnlMatMulPrimitive::useWeightsDecompressionImpl(const ov::element::Type in
     }
 #endif
 
-    return (any_of(inputType, f32, bf16, f16) && any_of(weightsType, u8, i8, u4, i4));
+    return (any_of(inputType, f32, bf16, f16) && any_of(weightsType, u8, i8, u4, i4, f8e4m3, f8e5m2));
 }
 
 DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const FCAttrs& fcAttrs,
@@ -543,18 +543,40 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
         createPrimitiveAttrs(attrs, memory, context, useWeightsDecompression, attrs.weightsNonTransposed);
 
     if (srcDesc->getShape().isDynamic() || weiDesc->getShape().isDynamic()) {
-        const auto& srcShape = srcDesc->getShape();
-        const auto& weiShape = weiDesc->getShape();
-        auto [inDymmyDims, weiDymmyDims] =
-            makeDummyInputDims(srcShape, weiShape, dstDesc->getShape(), attrs.transposeA, attrs.transposeB);
-        const auto& outDymmyDims = makeDummyOutputDims(inDymmyDims,
-                                                       weiDymmyDims,
-                                                       attrs.transposeA,
-                                                       attrs.transposeB,
-                                                       dstDesc->getShape().getRank());
-        srcDesc = std::make_shared<DnnlBlockedMemoryDesc>(srcDesc->getPrecision(), Shape(inDymmyDims));
-        weiDesc = std::make_shared<DnnlBlockedMemoryDesc>(weiDesc->getPrecision(), Shape(weiDymmyDims));
-        dstDesc = std::make_shared<DnnlBlockedMemoryDesc>(dstDesc->getPrecision(), Shape(outDymmyDims));
+        // makeDummyInputDims assumes batched matmul (src.rank == wei.rank == dst.rank).
+        // In fc-semantic mode the wei is 2D while src/dst can be 3D, so use a per-dim
+        // fallback that materializes static shapes via the descriptor's max dims.
+        if (attrs.fcSemantic) {
+            auto materialize = [](const MemoryDescPtr& d) {
+                const auto& shape = d->getShape();
+                if (!shape.isDynamic()) return d;
+                const auto& maxDims = shape.getMaxDims();
+                const auto& minDims = shape.getMinDims();
+                VectorDims dims(maxDims.size());
+                for (size_t i = 0; i < dims.size(); ++i) {
+                    dims[i] = maxDims[i] == Shape::UNDEFINED_DIM ? std::max<Dim>(minDims[i], 1)
+                                                                 : maxDims[i];
+                }
+                return std::static_pointer_cast<MemoryDesc>(
+                    std::make_shared<DnnlBlockedMemoryDesc>(d->getPrecision(), Shape(dims)));
+            };
+            srcDesc = materialize(srcDesc);
+            weiDesc = materialize(weiDesc);
+            dstDesc = materialize(dstDesc);
+        } else {
+            const auto& srcShape = srcDesc->getShape();
+            const auto& weiShape = weiDesc->getShape();
+            auto [inDymmyDims, weiDymmyDims] =
+                makeDummyInputDims(srcShape, weiShape, dstDesc->getShape(), attrs.transposeA, attrs.transposeB);
+            const auto& outDymmyDims = makeDummyOutputDims(inDymmyDims,
+                                                           weiDymmyDims,
+                                                           attrs.transposeA,
+                                                           attrs.transposeB,
+                                                           dstDesc->getShape().getRank());
+            srcDesc = std::make_shared<DnnlBlockedMemoryDesc>(srcDesc->getPrecision(), Shape(inDymmyDims));
+            weiDesc = std::make_shared<DnnlBlockedMemoryDesc>(weiDesc->getPrecision(), Shape(weiDymmyDims));
+            dstDesc = std::make_shared<DnnlBlockedMemoryDesc>(dstDesc->getPrecision(), Shape(outDymmyDims));
+        }
     }
 
     const dnnl::memory::desc srcDnnlDesc = MemoryDescUtils::convertToDnnlMemoryDesc(srcDesc)->getDnnlDesc();

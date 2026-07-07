@@ -91,10 +91,12 @@ static const TypeMapping dnnlFCTypeMapping {
     {{_u8 | _i8, _i8, _f16, _u8 | _i8 | _i32 | _bf16 | _f32}, {bypass(), bypass(), just<f32>(), bypass()}},
     {{_u8 | _i8, _i8, _any, _any}, {bypass(), bypass(), just<f32>(), just<f32>()}},
     // compresses int weights (@todo more strict requrements for output precision?)
-    {{_bf16, _u8 | _i8 | _nf4 | _u4 | _i4 | _f4e2m1 | _u2, _any, _any},       {bypass(), bypass(), use<0>(), use<0>()},
+    {{_bf16, _u8 | _i8 | _nf4 | _u4 | _i4 | _f4e2m1 | _u2 | _f8e4m3 | _f8e5m2, _any, _any},
+     {bypass(), bypass(), use<0>(), use<0>()},
      Require<dnnl::impl::cpu::x64::avx512_core_bf16>()}, // Ticket 122347
     {{_bf16, _u8 | _i8 | _nf4 | _u4 | _i4 | _f4e2m1, _any, _any},       {just<f32>(), bypass(), just<f32>(), just<f32>()}},
-    {{_f32,  _u8 | _i8 | _nf4 | _u4 | _i4 | _f4e2m1 | _u2, _any, _any},       {bypass(), bypass(), use<0>(), use<0>()}},
+    {{_f32,  _u8 | _i8 | _nf4 | _u4 | _i4 | _f4e2m1 | _u2 | _f8e4m3 | _f8e5m2, _any, _any},
+     {bypass(), bypass(), use<0>(), use<0>()}},
     // @todo should we fallback to FPXX instead of _f32?
     {{_any, _any, _any, _any},                                {just<f32>(), just<f32>(), just<f32>(), just<f32>()}},
     // @todo explicitly cover configuration limitations for oneDNN on ARM
@@ -149,6 +151,8 @@ static const TypeMapping dnnlMatMulTypeMapping {
     {{_u8 | _i8, _i8, _any, _any},                            {bypass(), bypass(), just<f32>(), just<f32>()}},
     // compresses int weights
     {{_f32 | _bf16 | _f16, _u8 | _i8, _any, _any},            {bypass(), bypass(), use<0>(), use<0>()}},
+    // compresses fp8 weights (decompressed inside brgemm matmul kernel)
+    {{_f32 | _bf16 | _f16, _f8e4m3 | _f8e5m2, _any, _any},    {bypass(), bypass(), use<0>(), use<0>()}},
     // @todo should we fallback to FPXX instead of _f32?
     {{_any, _any, _any, _any},                                {just<f32>(), just<f32>(), just<f32>(), just<f32>()}},
     // @todo explicitly cover configuration limitations for oneDNN on ARM
@@ -398,8 +402,14 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
                         VERIFY(noSparseDecompression(config), UNSUPPORTED_SPARSE_WEIGHTS);
                         return true;
                     })
-                VERIFY(dnnlMatMulSupportedPrecision(config), UNSUPPORTED_SRC_WEI_PRECISIONS);
                 VERIFY(noSparseDecompression(config), UNSUPPORTED_SPARSE_WEIGHTS);
+                // fp8 weights decompression must run on the brgemm matmul kernel: the
+                // inner_product brgemm path requires avx512_core_amx_fp16 for fp8 wei,
+                // which AMX-without-fp16 platforms (e.g. SPR, NVL) don't have.
+                if (any_of(weiType(config), f8e4m3, f8e5m2)) {
+                    return true;
+                }
+                VERIFY(dnnlMatMulSupportedPrecision(config), UNSUPPORTED_SRC_WEI_PRECISIONS);
                 VERIFY(weiRank(config) == 3U, UNSUPPORTED_WEI_RANK);
                 VERIFY(weiDims(config)[0] > 1, UNSUPPORTED_WEI_RANK);
                 return true;
