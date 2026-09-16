@@ -34,6 +34,10 @@ class DnnlMatMulPrimitive {
         bool transposeA = false;
         bool transposeB = false;
         bool fcSemantic = false;
+        // AMX int8 grouped-quantization dynamic-quant path: distinguishes cache entries built
+        // with an s8 primitive src descriptor from the (otherwise identical) f32/bf16 ones -
+        // both share the same node-level ARG_SRC desc, so this must be part of the key.
+        bool dynQuant = false;
 
         [[nodiscard]] size_t hash() const;
         bool operator==(const Key& rhs) const;

@@ -158,6 +158,13 @@ static const TypeMapping dnnlMatMulTypeMapping {
     {{_u8 | _i8, _i8, _any, _any},                            {bypass(), bypass(), just<f32>(), just<f32>()}},
     // compresses int weights
     {{_f32 | _bf16 | _f16, _u8 | _i8, _any, _any},            {bypass(), bypass(), use<0>(), use<0>()}},
+    // int8:int4 grouped dynamic quantization on AMX (fullyconnected_dnnl_matmul_int8_dynquant):
+    // keep src/wei at their original precision, the s8 activation conversion happens internally
+    // inside the executor and is not a node-materialized type. Gated to AMX since that is the
+    // only platform this new entry targets in v1; on other platforms u4/i4 weights keep falling
+    // through to the {_any, _any, _any, _any} row below, matching pre-existing behavior.
+    {{_f32 | _bf16, _u4 | _i4, _any, _any},                   {bypass(), bypass(), use<0>(), use<0>()},
+     []() { return ov::with_cpu_x86_avx512_core_amx(); }},
     // @todo should we fallback to FPXX instead of _f32?
     {{_any, _any, _any, _any},                                {just<f32>(), just<f32>(), just<f32>(), just<f32>()}},
     // @todo explicitly cover configuration limitations for oneDNN on ARM
@@ -402,6 +409,123 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
             AcceptsAnyShape<FCAttrs>,
             CreateDefault<MatMulKleidiAIExecutor, FCAttrs>{}
             )
+        OV_CPU_INSTANCE_DNNL(
+            "fullyconnected_dnnl_matmul_int8_dynquant",
+            ExecutorType::Dnnl,
+            OperationType::MatMul,
+            // supports
+            [](const FCConfig& config) -> bool {
+                VERIFY(ov::with_cpu_x86_avx512_core_amx(), UNSUPPORTED_ISA);
+                VERIFY(config.attrs.dynamicQuantizationGroupSize != 0, HEURISTICS_MISMATCH);
+                VERIFY(any_of(srcType(config), f32, bf16), UNSUPPORTED_SRC_PRECISIONS);
+                // int4 (u4/i4) weights are excluded for now: verified (via ONEDNN_VERBOSE) to
+                // crash with an Xbyak "evex is invalid" encoding error on HW that selects the
+                // "amx_fp16" brgemm_matmul kernel variant, reproduced with no bias and no
+                // post-op, so independent of the bias issue noted at A6 below. int8 (u8/i8)
+                // weights do not hit this. Needs further investigation; tracked as a known
+                // issue, not part of this feature's v1 DoD - re-enable once root-caused.
+                VERIFY(any_of(weiType(config), i8, u8), UNSUPPORTED_WEI_PRECISIONS);
+                VERIFY(any_of(dstType(config), f32, bf16), UNSUPPORTED_DST_PRECISIONS);
+                VERIFY(weiRank(config) == 2U, UNSUPPORTED_WEI_RANK);
+                VERIFY(noSparseDecompression(config), UNSUPPORTED_SPARSE_WEIGHTS);
+
+                const auto groupSize = config.attrs.dynamicQuantizationGroupSize;
+                VERIFY(groupSize % 16 == 0, HEURISTICS_MISMATCH);
+
+                const auto ic = weiDims(config)[1];
+                VERIFY(ic % groupSize == 0 && ic >= groupSize, HEURISTICS_MISMATCH);
+                return true;
+            },
+            // createOptimalConfig
+            [](const FCConfig& config) -> std::optional<executor::Config<FCAttrs>> {
+                return createOptimalConfigCommon(config,
+                                                 dnnlMatMulTypeMapping,
+                                                 dnnlFCLayoutConfig,
+                                                 fcMappingNotation);
+            },
+            // acceptsShapes
+            [](const FCAttrs& attrs, const MemoryArgs& memory) -> bool {
+                const auto groupSize = attrs.dynamicQuantizationGroupSize;
+
+                // A1: weight scales are required - this executor only ever runs on
+                // FullyConnectedCompressed nodes, but the scales/zero-points memory is only
+                // visible here (in MemoryArgs), not in FCConfig::descs (see supports() above).
+                const auto scalesIt = memory.find(ARG_WEI | ARG_ATTR_SCALES);
+                if (scalesIt == memory.end()) {
+                    return false;
+                }
+
+                const auto& weiDesc = memory.at(ARG_WEI)->getDescPtr();
+                const auto ic = weiDesc->getShape().getStaticDims()[1];
+                const auto& scalesDims = scalesIt->second->getShape().getStaticDims();
+
+                if (scalesDims.size() > 1 && scalesDims[1] != 1) {
+                    const auto weiGroupSize = ic / scalesDims[1];
+                    // A2: src and weight group sizes must be mutually divisible so every brgemm
+                    // K-chunk stays within a single group of both the src and the weight scales.
+                    if (weiGroupSize % groupSize != 0 && groupSize % weiGroupSize != 0) {
+                        return false;
+                    }
+                }
+
+                if (auto zpIt = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS); zpIt != memory.end()) {
+                    // A3: asymmetric weights (a real zero-point) are excluded for now. Verified
+                    // directly (with dynamic quantization fully disabled, i.e. group_size(0), so
+                    // this executor was not even involved) that bf16 activations + AMX +
+                    // asymmetric compressed weights already fail today via the pre-existing,
+                    // untouched AMX BF16 TMUL path - confirmed by re-running the pre-existing
+                    // smoke_MatMulCompressedWeights_amx suite with --disable_tests_skipping
+                    // (normally skipped wholesale on AMX+bf16, see
+                    // shared_tests_instances/skip_tests_config.cpp:623). Since it is already
+                    // broken independent of this feature, rejecting it here simply keeps this
+                    // executor from being a NEW way to reach the same known-bad territory;
+                    // symmetric-only (no zero-point) is accepted below. Needs further
+                    // investigation; tracked as a known issue, not part of this feature's v1 DoD.
+                    return false;
+                }
+
+                // A6: bias is excluded for now: verified (via ONEDNN_VERBOSE) that a bias
+                // combined with int8 grouped-quantization attributes crashes with the same
+                // "evex is invalid" Xbyak encoding error as the int4-weights case above, on HW
+                // that selects the "amx_fp16" brgemm_matmul kernel variant. The crash happens
+                // during primitive/kernel creation, so it must be prevented here rather than
+                // left to fail at compile_model() time. Needs further investigation; tracked as
+                // a known issue, not part of this feature's v1 DoD.
+                if (!memory.at(ARG_BIAS)->getDesc().empty()) {
+                    return false;
+                }
+
+                // A5 (decoding-shape / small-M gate) is intentionally not implemented yet: the
+                // threshold depends on perf data gathered on real models (see the
+                // implementation plan's P5 phase), which is out of scope for this change.
+                return true;
+            },
+            // create
+            [](const FCAttrs& attrs,
+               const MemoryArgs& memory,
+               const ExecutorContext::CPtr& context) -> ExecutorPtr {
+                const bool hasBias = !memory.at(ARG_BIAS)->getDesc().empty();
+                MatMulAttrs matMulAttrs {
+                    false,
+                    true,
+                    hasBias,
+                    attrs.weightsNonTransposed,
+                    false,
+                    true,
+                    true,
+                    attrs.dynamicQuantizationGroupSize,
+                    {},
+                    attrs.postOps
+                };
+
+                return std::make_shared<
+                    DnnlExecutor<DnnlMatMulPrimitive, MatMulAttrs, DnnlShapeAgnosticData,
+                                 DefaultInstantiator<DnnlMatMulPrimitive, MatMulAttrs, DnnlShapeAgnosticData>>>(
+                    matMulAttrs,
+                    memory,
+                    context,
+                    false);
+            })
         OV_CPU_INSTANCE_DNNL(
             "matmul_dnnl",
             ExecutorType::Dnnl,

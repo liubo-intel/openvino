@@ -7,19 +7,25 @@
 #include <oneapi/dnnl/dnnl_common_types.h>
 #include <oneapi/dnnl/dnnl_types.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <oneapi/dnnl/dnnl.hpp>
 #include <utility>
 
 #include "cpu_memory.h"
 #include "memory_desc/cpu_memory_desc_utils.h"
+#include "memory_desc/dnnl_blocked_memory_desc.h"
 #include "memory_desc/dnnl_memory_desc.h"
 #include "nodes/executors/dnnl/dnnl_aliases.hpp"
 #include "nodes/executors/dnnl/dnnl_utils.hpp"
 #include "nodes/executors/executor.hpp"
 #include "nodes/executors/memory_arguments.hpp"
+#include "nodes/kernels/dynamic_quant/dynamic_quant.hpp"
 #include "onednn/iml_type_mapper.h"
+#include "openvino/core/except.hpp"
 #include "utils/debug_capabilities.h"
+#include "utils/general_utils.h"
 
 namespace ov::intel_cpu {
 
@@ -36,7 +42,9 @@ public:
           m_context(std::move(context)),
           m_shapeAgnosticData(Primitive::createShapeAgnosticData(m_attrs, memory, m_context, cacheWeights)),
           m_primArgs(m_shapeAgnosticData->m_primAttrs.dnnlArgs),
-          m_fc3Das2D(fc3Das2D) {}
+          m_fc3Das2D(fc3Das2D),
+          m_dynQuant(m_shapeAgnosticData->m_dynQuant),
+          m_dynQuantGroupSize(m_shapeAgnosticData->m_dynQuantGroupSize) {}
     bool update(const MemoryArgs& memory) override {
         const auto primitive = createPrimitive(memory, m_attrs);
         if (!primitive) {
@@ -48,8 +56,12 @@ public:
     }
 
     void execute(const MemoryArgs& memory) override {
-        if (resetSrcMemoryDataHandle) {
-            m_primArgs[DNNL_ARG_SRC].set_data_handle(memory.at(ARG_SRC)->getData());
+        if (m_dynQuant) {
+            quantizeSrc(memory);
+        } else {
+            if (resetSrcMemoryDataHandle) {
+                m_primArgs[DNNL_ARG_SRC].set_data_handle(memory.at(ARG_SRC)->getData());
+            }
         }
         if (resetDstMemoryDataHandle) {
             m_primArgs[DNNL_ARG_DST].set_data_handle(memory.at(ARG_DST)->getData());
@@ -59,10 +71,14 @@ public:
     }
 
     void execute() override {
+        OPENVINO_ASSERT(!m_dynQuant, "DnnlExecutor: the no-argument execute() overload cannot quantize the src for "
+                                     "the dynamic-quant path - execute(memory) must be used instead");
         m_primitive->execute(m_primArgs);
     }
 
     void execute() const override {
+        OPENVINO_ASSERT(!m_dynQuant, "DnnlExecutor: the no-argument execute() overload cannot quantize the src for "
+                                     "the dynamic-quant path - execute(memory) must be used instead");
         m_primitive->execute(m_primArgs);
     }
 
@@ -79,9 +95,20 @@ public:
         if (curNumaNode == numaNodeID) {
             return;
         }
-        const auto newPrimMemDesc = m_primitive->scratchPadDesc();
-        m_scratchPadMemory = m_context->getScratchPad()->createScratchPadMem(newPrimMemDesc);
-        m_primArgs[DNNL_ARG_SCRATCHPAD] = m_scratchPadMemory->getPrimitive();
+        if (m_dynQuant) {
+            // The combined scratch (qsrc | src_scale | mm-scratch, see updateDynQuantScratch())
+            // must be re-partitioned as a whole on the new NUMA node - a plain
+            // createScratchPadMem(mm-scratch-only-size) here would alias/overwrite the qsrc and
+            // src_scale views. The qsrc/src_scale descriptors themselves are shape-derived and
+            // unchanged by a NUMA move, so they are reused as-is; only the mm-scratch size can
+            // legitimately differ (a NUMA move never happens without an update() first, but the
+            // primitive's own scratchpad size is re-read defensively rather than cached).
+            updateDynQuantScratch(m_primitive->scratchPadDesc()->getCurrentMemSize());
+        } else {
+            const auto newPrimMemDesc = m_primitive->scratchPadDesc();
+            m_scratchPadMemory = m_context->getScratchPad()->createScratchPadMem(newPrimMemDesc);
+            m_primArgs[DNNL_ARG_SCRATCHPAD] = m_scratchPadMemory->getPrimitive();
+        }
 
         if (auto it = m_primArgs.find(DNNL_ARG_WEIGHTS); it != m_primArgs.end()) {
             if (!mbind_move(it->second, numaNodeID)) {
@@ -178,23 +205,113 @@ private:
         m_primArgs[DNNL_ARG_SCRATCHPAD] = m_scratchPadMemory->getPrimitive();
     }
 
+    // Builds the qsrc (s8) and src_scale (f32) dnnl::memory descriptors for the current shape
+    // and (re)builds the combined scratch (qsrc | src_scale | mm-scratch) from scratch. M/K are
+    // recomputed from the *node*-level ARG_SRC shape every call - the block backing the
+    // combined scratch may grow and its base pointer may move, so nothing here (nor in
+    // moveMemToNumaNode()) may cache a raw pointer across update() calls.
+    void updateDynQuantSrcMemory(const PrimitivePtr& newPrimitive, const MemoryArgs& memory) {
+        const auto& srcDims = memory.at(ARG_SRC)->getShape().getDims();
+        m_dynQuantK = srcDims.back();
+        m_dynQuantM = 1;
+        for (size_t i = 0; i + 1 < srcDims.size(); i++) {
+            m_dynQuantM *= srcDims[i];
+        }
+
+        // The primitive's own compiled src descriptor is already s8 and already at whatever
+        // rank createDescriptorInternalAsFc() normalized to - reuse it verbatim rather than
+        // rebuilding dims/strides by hand.
+        m_qsrcDnnlDesc = newPrimitive->srcDesc()->getDnnlDesc();
+
+        // Src scale dims mirror the primitive's src dims with the innermost (K) dim divided by
+        // the group size, matching the {1, GK} groups set on DNNL_ARG_SRC in
+        // createPrimitiveAttrs() (group 1 - i.e. unchanged - for every other dim, including M).
+        auto scaleDims = m_qsrcDnnlDesc.get_dims();
+        scaleDims.back() /= static_cast<dnnl::memory::dim>(m_dynQuantGroupSize);
+        dnnl::memory::dims denseStrides(scaleDims.size());
+        dnnl::memory::dim stride = 1;
+        for (int i = static_cast<int>(scaleDims.size()) - 1; i >= 0; --i) {
+            denseStrides[i] = stride;
+            stride *= scaleDims[i];
+        }
+        m_srcScaleDnnlDesc = dnnl::memory::desc(scaleDims, dnnl::memory::data_type::f32, denseStrides);
+
+        updateDynQuantScratch(newPrimitive->scratchPadDesc()->getCurrentMemSize());
+    }
+
+    // (Re)builds the single combined scratch block and rebinds the qsrc/src_scale/mm-scratch
+    // views + their DNNL_ARG_* entries in m_primArgs. Uses the cached m_qsrcDnnlDesc /
+    // m_srcScaleDnnlDesc, so it is safe to call from moveMemToNumaNode() (no shape change)
+    // as well as from updateDynQuantSrcMemory() (fresh shape).
+    void updateDynQuantScratch(size_t mmScratchSize) {
+        const size_t sizeQsrc = rnd_up(m_qsrcDnnlDesc.get_size(), 64);
+        const size_t sizeScale = rnd_up(m_srcScaleDnnlDesc.get_size(), 64);
+        const size_t sizeMmScratch = rnd_up(mmScratchSize, 64);
+        const size_t total = sizeQsrc + sizeScale + sizeMmScratch;
+
+        const auto combinedDesc = std::make_shared<DnnlBlockedMemoryDesc>(ov::element::u8, Shape({total}));
+        m_combinedScratch = m_context->getScratchPad()->createScratchPadMem(combinedDesc);
+
+        auto* base = static_cast<uint8_t*>(m_combinedScratch->getData());
+        const auto& engine = m_context->getEngine();
+
+        m_qsrcMem = dnnl::memory(m_qsrcDnnlDesc, engine, DNNL_MEMORY_NONE);
+        m_qsrcMem.set_data_handle(base);
+        m_srcScaleMem = dnnl::memory(m_srcScaleDnnlDesc, engine, DNNL_MEMORY_NONE);
+        m_srcScaleMem.set_data_handle(base + sizeQsrc);
+        m_mmScratchMem = dnnl::memory(dnnl::memory::desc({static_cast<dnnl::memory::dim>(mmScratchSize)},
+                                                         dnnl::memory::data_type::u8,
+                                                         dnnl::memory::format_tag::a),
+                                      engine,
+                                      DNNL_MEMORY_NONE);
+        m_mmScratchMem.set_data_handle(base + sizeQsrc + sizeScale);
+
+        m_primArgs[DNNL_ARG_SRC] = m_qsrcMem;
+        m_primArgs[DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC] = m_srcScaleMem;
+        m_primArgs[DNNL_ARG_SCRATCHPAD] = m_mmScratchMem;
+    }
+
+    void quantizeSrc(const MemoryArgs& memory) {
+        const auto& srcMem = memory.at(ARG_SRC);
+        ov::Extensions::Cpu::XARCH::quant_src_grouped_i8(srcMem->getPrecision(),
+                                                         srcMem->getData(),
+                                                         static_cast<int8_t*>(m_qsrcMem.get_data_handle()),
+                                                         static_cast<float*>(m_srcScaleMem.get_data_handle()),
+                                                         m_dynQuantM,
+                                                         m_dynQuantK,
+                                                         m_dynQuantGroupSize,
+                                                         m_context->getCpuParallel());
+    }
+
     void updateMemory(const PrimitivePtr currentPrimitive, const PrimitivePtr newPrimitive, const MemoryArgs& memory) {
-        const auto& srcDesc = MemoryDescUtils::convertToDnnlMemoryDesc(memory.at(ARG_SRC)->getDescPtr());
         const auto& weiDesc = MemoryDescUtils::convertToDnnlMemoryDesc(memory.at(ARG_WEI)->getDescPtr());
         const auto& dstDesc = MemoryDescUtils::convertToDnnlMemoryDesc(memory.at(ARG_DST)->getDescPtr());
 
-        if (m_fc3Das2D) {
+        if (m_dynQuant) {
+            updateDynQuantSrcMemory(newPrimitive, memory);
+        } else if (m_fc3Das2D) {
+            const auto& srcDesc = MemoryDescUtils::convertToDnnlMemoryDesc(memory.at(ARG_SRC)->getDescPtr());
             updateSrcMemory(srcDesc, newPrimitive, memory.at(ARG_SRC));
-            updateDstMemory(dstDesc, newPrimitive, memory.at(ARG_DST));
         } else {
             m_primArgs[DNNL_ARG_SRC] = memory.at(ARG_SRC)->getPrimitive();
+        }
+
+        if (m_fc3Das2D) {
+            updateDstMemory(dstDesc, newPrimitive, memory.at(ARG_DST));
+        } else {
             m_primArgs[DNNL_ARG_DST] = memory.at(ARG_DST)->getPrimitive();
         }
 
         updateWeightsMemory(weiDesc, currentPrimitive, newPrimitive, memory.at(ARG_WEI));
         updateBiasMemory(memory.at(ARG_BIAS));
         updatePostOpsMemory(memory);
-        updateScratchPadMem(currentPrimitive, newPrimitive);
+
+        if (m_dynQuant) {
+            // Already handled by updateDynQuantSrcMemory() above (single combined scratch, see
+            // its comment for why this cannot reuse the plain updateScratchPadMem() path).
+        } else {
+            updateScratchPadMem(currentPrimitive, newPrimitive);
+        }
     }
 
     PrimitivePtr createPrimitive(const MemoryArgs& memory, const Attrs& attrs) {
@@ -211,6 +328,19 @@ private:
     PrimitivePtr m_primitive;
     int curNumaNode = -1;
     bool m_fc3Das2D = false;
+
+    // AMX int8 grouped-quantization dynamic-quant path (DnnlMatMulPrimitive only). Inert
+    // (m_dynQuant == false) for every other primitive/executor instantiation.
+    bool m_dynQuant = false;
+    uint64_t m_dynQuantGroupSize = 0;
+    size_t m_dynQuantM = 0;
+    size_t m_dynQuantK = 0;
+    dnnl::memory::desc m_qsrcDnnlDesc;
+    dnnl::memory::desc m_srcScaleDnnlDesc;
+    MemoryPtr m_combinedScratch;
+    dnnl::memory m_qsrcMem;
+    dnnl::memory m_srcScaleMem;
+    dnnl::memory m_mmScratchMem;
 };
 
 }  // namespace ov::intel_cpu
