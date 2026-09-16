@@ -731,6 +731,24 @@ void DnnlPostOpsComposer::appendZeroPointsLegacy(const MemoryArgs& memory) {
     }
 }
 
+// oneDNN/OV generic reorder has no kernel to transpose sub-byte (u4/i4, 2-per-byte packed)
+// data between "oi"/"io" (i.e. plain "ab"/"ba") layouts - element boundaries don't align with
+// byte boundaries once transposed. Do the nibble-level transpose by hand instead of routing
+// through Memory::load()/reorderData(), mirroring ov::reference::transpose_4bit's approach
+// (src/core/reference/src/op/transpose.cpp), specialized for the 2D (OC, G) -> (G, OC) case
+// this function needs. dst is expected to be zero-initialized.
+static void transpose4BitOCG(const uint8_t* src, uint8_t* dst, size_t OC, size_t G) {
+    for (size_t g = 0; g < G; ++g) {
+        for (size_t oc = 0; oc < OC; ++oc) {
+            const size_t srcIdx = (oc * G) + g;
+            const size_t dstIdx = (g * OC) + oc;
+            const uint8_t nibble = (src[srcIdx / 2] >> ((srcIdx % 2) * 4)) & 0x0FU;
+            const uint8_t shift = (dstIdx % 2) * 4;
+            dst[dstIdx / 2] = (dst[dstIdx / 2] & ~(0x0FU << shift)) | (nibble << shift);
+        }
+    }
+}
+
 static MemoryPtr prepackDecompressionParams(const MemoryCPtr& paramsPtr,
                                             bool needTranspose,
                                             ov::element::Type dstPrc,
@@ -754,12 +772,18 @@ static MemoryPtr prepackDecompressionParams(const MemoryCPtr& paramsPtr,
                                         DnnlExtensionUtils::ElementTypeToDataType(dstPrc),
                                         dnnl::memory::format_tag::io);
     auto dstMem = std::make_shared<Memory>(engine, dstMemoryDesc);
+
+    const auto srcPrc = paramsPtr->getDescPtr()->getPrecision();
+    if (needTranspose && srcPrc == dstPrc && any_of(dstPrc, ov::element::u4, ov::element::i4)) {
+        auto* dst = dstMem->getDataAs<uint8_t>();
+        std::memset(dst, 0, dstMem->getSize());
+        transpose4BitOCG(static_cast<const uint8_t*>(paramsPtr->getData()), dst, OC, G);
+        return dstMem;
+    }
+
     auto srcFormat = needTranspose ? dnnl::memory::format_tag::oi : dnnl::memory::format_tag::io;
 
-    DnnlBlockedMemoryDesc srcMemoryDesc(
-        dstShape,
-        DnnlExtensionUtils::ElementTypeToDataType(paramsPtr->getDescPtr()->getPrecision()),
-        srcFormat);
+    DnnlBlockedMemoryDesc srcMemoryDesc(dstShape, DnnlExtensionUtils::ElementTypeToDataType(srcPrc), srcFormat);
     auto srcMem = std::make_shared<Memory>(engine, srcMemoryDesc, paramsPtr->getData());
 
     dstMem->load(*srcMem, true, false);

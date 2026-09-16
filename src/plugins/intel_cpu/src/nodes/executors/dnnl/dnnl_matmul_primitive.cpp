@@ -69,6 +69,7 @@ size_t DnnlMatMulPrimitive::Key::hash() const {
     seed = hash_combine(seed, transposeA);
     seed = hash_combine(seed, transposeB);
     seed = hash_combine(seed, fcSemantic);
+    seed = hash_combine(seed, dynQuant);
 
     return seed;
 }
@@ -90,7 +91,7 @@ bool DnnlMatMulPrimitive::Key::operator==(const Key& rhs) const {
     }
 
     result = result && *attr.get() == *rhs.attr.get() && implType == rhs.implType && fcSemantic == rhs.fcSemantic &&
-             transposeA == rhs.transposeA && transposeB == rhs.transposeB;
+             transposeA == rhs.transposeA && transposeB == rhs.transposeB && dynQuant == rhs.dynQuant;
 
     return result;
 }
@@ -130,7 +131,8 @@ std::shared_ptr<DnnlMatMulPrimitive> DnnlMatMulPrimitive::create(const MemoryArg
                       shapeAgnosticData->m_implType,
                       attrs.transposeA,
                       attrs.transposeB,
-                      attrs.fcSemantic};
+                      attrs.fcSemantic,
+                      shapeAgnosticData->m_dynQuant};
 
     const auto defaultImplType = shapeAgnosticData->m_implType;
 
@@ -179,7 +181,7 @@ DnnlMemoryDescPtr DnnlMatMulPrimitive::makeTransposedWeightDescriptor(const Dnnl
     const auto wDataType = weiDesc.get_data_type();
     /* in case the second input is constant we can transpose weights beforehand
      * and avoid transposition during execution */
-    const auto wDims = getDims(weiDesc, attrs.transposeB);
+    auto wDims = getDims(weiDesc, attrs.transposeB);
     /**
      * We need to transpose weights in two scenarios:
      * - dnnl matmul is used as FullyConnected executor and weights are not transposed yet (optimization to pack weights
@@ -188,7 +190,16 @@ DnnlMemoryDescPtr DnnlMatMulPrimitive::makeTransposedWeightDescriptor(const Dnnl
      *   currently we always convert MatMul operation with constant second input to FullyConnected operation.
      */
     const bool transpose = attrs.fcSemantic ? attrs.weightsNonTransposed : attrs.transposeB;
-    const auto format = getFormat(weiDesc.get_ndims(), transpose);
+    // The (always at-most-2D) FC weight constant can be lower-rank than the destination descriptor
+    // (e.g. a 3D activation/output with a batch dim while the weight itself stays 2D [N, K]).
+    // Pad with leading 1s to match dstDesc's rank *before* picking the format tag / building the
+    // transposed descriptor: choosing the tag from the un-padded rank and then reshape()-ing onto a
+    // higher-rank shape reinterprets the "ba"-ordered 2D layout into a nonsensical tag (e.g. "cab")
+    // that has no reorder kernel, since reshape() assumes the dims it's given fill in left-to-right
+    // over the *existing* physical layout rather than being padded first.
+    const auto dstRank = dstDesc->getDnnlDesc().get_ndims();
+    wDims = normalizeToRank(wDims, dstRank);
+    const auto format = getFormat(dstRank, transpose);
     const auto transposedWeiDesc = dnnl::memory::desc{wDims, wDataType, format};
 
     const auto reshapedWeiDesc = transposedWeiDesc.reshape(dstDesc->getDnnlDesc().get_dims());
@@ -207,6 +218,17 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
 
     const auto& originalDims = dstDesc->getShape().getMinDims();
     const auto& dims = originalDims;
+
+    // AMX int8 grouped-quantization dynamic-quant path: the node keeps ARG_SRC at f32/bf16 (the
+    // s8 conversion happens internally in the executor, see dnnl_executor.hpp), so this is
+    // orthogonal to (and mutually exclusive with) the plain weight-decompression path below.
+    const bool dynQuant = attrs.dynamicQuantizationGroupSize != 0;
+    // fpmath_mode::any (the weight-decompression trick) must never be set together with the
+    // dynamic-quant src scales attribute set below - this is a true int8 matmul, not an
+    // upconvert-and-multiply. useWeightsDecompressionImpl() only looks at node-level src/wei
+    // precision (f32/bf16 x u4/i4/u8/i8) and cannot tell the two paths apart, so it is
+    // overridden here explicitly.
+    useWeightsDecompression = useWeightsDecompression && !dynQuant;
 
     auto isINT8 =
         any_of(srcDesc->getPrecision(), ov::element::u8, ov::element::i8) && weiDesc->getPrecision() == ov::element::i8;
@@ -231,10 +253,14 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
             dnnlpoc.appendDecompressionScales(it->second, !weightsNonTransposed, dstPrc, normWeiDims);
         }
         if (auto it = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS); it != memory.end()) {
-            // TODO: clarify oneDNN requirements on ZP precision
             auto zp = it->second;
             auto zpPrc = zp->getPrecision();
-            auto dstPrc = any_of(zpPrc, i32, i8, u8, i4, u4) ? zpPrc : i32;
+            // Under dynamic quantization oneDNN requires the zero-point dtype to exactly equal
+            // the (raw) weight dtype (wei_zp_dt == orig_wei_dt); the generic "fall back to i32"
+            // mapping used for plain weight decompression does not satisfy that and would make
+            // primitive descriptor creation silently fail (dispatch to "unimplemented").
+            // TODO: clarify oneDNN requirements on ZP precision for the non-dynQuant case.
+            auto dstPrc = dynQuant ? weiDesc->getPrecision() : (any_of(zpPrc, i32, i8, u8, i4, u4) ? zpPrc : i32);
             dnnlpoc.appendDecompressionZeroPoints(zp, !weightsNonTransposed, dstPrc, normWeiDims);
         }
     }
@@ -242,6 +268,17 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
     auto primAttrs = dnnlpoc.compose();
     if (useWeightsDecompression) {
         primAttrs.attr.set_fpmath_mode(fpmath_mode::any, true);
+    }
+
+    if (dynQuant) {
+        // Symmetric, per-(M,K-group) src scales: mask covers every src dim (oneDNN's
+        // full_tensor_mask()) so a batch dim (rank-3 activations) gets its own scale plane
+        // rather than being broadcast across batches; groups only ever subdivide the last two
+        // dims ({1, GK}), independent of rank.
+        const auto srcRank = srcDesc->getShape().getRank();
+        const int srcScaleMask = (1 << srcRank) - 1;
+        const auto groupSize = static_cast<dnnl::memory::dim>(attrs.dynamicQuantizationGroupSize);
+        primAttrs.attr.set_scales(DNNL_ARG_SRC, srcScaleMask, {1, groupSize}, dnnl::memory::data_type::f32);
     }
     // by default fp16 matmul ACL kernels accumulate into fp32
     // the default behaviour is changed by using f16 accumulator to improve performance
@@ -261,7 +298,8 @@ static dnnl::matmul::primitive_desc createDescriptorInternalAsFc(const dnnl::mem
                                                                  const dnnl::memory::desc& outputDesc,
                                                                  const dnnl::primitive_attr& attr,
                                                                  const dnnl::engine& engine,
-                                                                 const bool useWeightsDecompression) {
+                                                                 const bool useWeightsDecompression,
+                                                                 const bool dynQuant) {
     auto weiDims = weightDesc.get_dims();
     std::swap(weiDims[weiDims.size() - 1], weiDims[weiDims.size() - 2]);
 
@@ -272,13 +310,26 @@ static dnnl::matmul::primitive_desc createDescriptorInternalAsFc(const dnnl::mem
     const auto outDims = normalizeToRank(outputDesc.get_dims(), maxRank);
     weiDims = normalizeToRank(weiDims, maxRank);
 
-    const dnnl::memory::desc inputsDesc = inputDesc.reshape(inpDims);
+    const dnnl::memory::desc reshapedInputDesc = inputDesc.reshape(inpDims);
+    // Under dynamic quantization the primitive descriptor's src is s8 (the executor quantizes
+    // f32/bf16 -> s8 internally before every execute() call); dims/strides are unaffected, only
+    // the data type changes.
+    const dnnl::memory::desc inputsDesc =
+        dynQuant ? dnnl::memory::desc(reshapedInputDesc.get_dims(),
+                                      dnnl::memory::data_type::s8,
+                                      reshapedInputDesc.get_strides())
+                : reshapedInputDesc;
     const dnnl::memory::desc outputsDesc = outputDesc.reshape(outDims);
     auto newBiasDesc = !biasDesc.is_zero() ? biasDesc.reshape(biaDims) : biasDesc;
 
     auto idt = inputDesc.get_data_type();
     auto wdt = idt;
-    if (useWeightsDecompression) {
+    if (dynQuant) {
+        // Keep the weight dtype exactly as provided (s8/u8/s4/u4) - unlike the s8-src
+        // weight-decompression heuristic below, oneDNN's int8-grouped-quantization path
+        // requires the *raw* weight dtype, not a forced s8.
+        wdt = weightDesc.get_data_type();
+    } else if (useWeightsDecompression) {
         wdt = weightDesc.get_data_type();
     } else if (any_of(idt, dnnl::memory::data_type::u8, dnnl::memory::data_type::s8)) {
         wdt = memory::data_type::s8;
@@ -336,7 +387,8 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
                                           const bool transposeB,
                                           [[maybe_unused]] const bool useSparseWeights,
                                           const bool useWeightsDecompression,
-                                          const bool fcSemantic) {
+                                          const bool fcSemantic,
+                                          const bool dynQuant = false) {
     auto createDescriptor = [&]() {
         return fcSemantic ? createDescriptorInternalAsFc(inputDesc,
                                                          weightDesc,
@@ -344,7 +396,8 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
                                                          outputDesc,
                                                          attr,
                                                          engine,
-                                                         useWeightsDecompression)
+                                                         useWeightsDecompression,
+                                                         dynQuant)
                           : createDescriptorInternal(inputDesc,
                                                      weightDesc,
                                                      biasDesc,
@@ -382,7 +435,15 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
                 }
             });
 
-        return prim_desc_w_priority.prim_desc;
+        // None of the enumerated implementations matched an entry in implPriorities (e.g. a
+        // brand-new impl name for a shape/attr combination implPriorities was never updated
+        // for) - fall back to oneDNN's own default choice for this descriptor rather than
+        // silently returning an empty primitive_desc, mirroring the fallback the non-undef
+        // branch below already does (found ? prim_desc : first_desc).
+        if (prim_desc_w_priority.prim_desc) {
+            return prim_desc_w_priority.prim_desc;
+        }
+        return cur_desc;
     }
 
     auto prim_desc = createDescriptor();
@@ -475,8 +536,17 @@ static std::pair<VectorDims, VectorDims> makeDummyInputDims(const Shape& in0,
     // fill batches
     for (size_t i = 0; i < inDims0.size() - 2; i++) {
         if (outDims[i] != Shape::UNDEFINED_DIM) {
-            inDims0[i] = outDims[i];
-            inDims1[i] = outDims[i];
+            // A definite 1 marks a broadcast batch dim (e.g. an FC weight's synthetic
+            // leading dims padded up to the activation's rank, see createShapeAgnosticData())
+            // - preserve it rather than overwriting with the output's batch value, otherwise
+            // the dummy shape stops being broadcast-compatible and oneDNN may find no matching
+            // implementation for it.
+            if (inDims0[i] != 1) {
+                inDims0[i] = outDims[i];
+            }
+            if (inDims1[i] != 1) {
+                inDims1[i] = outDims[i];
+            }
         } else {
             fillDummy(i, i);
         }
@@ -538,15 +608,35 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
     auto dstDesc = memory.at(ARG_DST)->getDescPtr();
     const auto& biasDesc = memory.at(ARG_BIAS)->getDescPtr();
 
+    const bool dynQuant = attrs.dynamicQuantizationGroupSize != 0;
+    // useWeightsDecompressionImpl() cannot distinguish the dynamic-quant path from plain weight
+    // decompression by node-level precision alone (both are f32/bf16 src x u4/i4/u8/i8 wei);
+    // createPrimitiveAttrs() forces it back to false internally for dynQuant, but it must also be
+    // suppressed here since it also selects wdt=weightDesc dtype in createDescriptorInternalAsFc
+    // - which happens to be the same choice dynQuant makes, so no behavior difference there.
     const auto useWeightsDecompression = useWeightsDecompressionImpl(srcDesc->getPrecision(), weiDesc->getPrecision());
     const auto postOpData =
         createPrimitiveAttrs(attrs, memory, context, useWeightsDecompression, attrs.weightsNonTransposed);
 
     if (srcDesc->getShape().isDynamic() || weiDesc->getShape().isDynamic()) {
         const auto& srcShape = srcDesc->getShape();
-        const auto& weiShape = weiDesc->getShape();
+        auto weiShape = weiDesc->getShape();
+        const auto& dstShape = dstDesc->getShape();
+
+        // FC weights are always rank-2 ([OC, IC]), constant and static, while the
+        // activation/output can be N-D (e.g. rank-3 [batch, seq_len, hidden] for real
+        // dynamic-shape LLM inference where the FC node does not flatten batch dims).
+        // makeDummyInputDims() requires all three ranks to match, so pad the weight shape
+        // with leading 1s here, mirroring the normalizeToRank() padding that
+        // createDescriptorInternalAsFc() applies later when building the real (non-dummy)
+        // primitive descriptor.
+        if (attrs.fcSemantic && weiShape.getRank() < srcShape.getRank()) {
+            const auto rank = srcShape.getRank();
+            weiShape = Shape(normalizeToRank(weiShape.getMinDims(), rank), normalizeToRank(weiShape.getMaxDims(), rank));
+        }
+
         auto [inDymmyDims, weiDymmyDims] =
-            makeDummyInputDims(srcShape, weiShape, dstDesc->getShape(), attrs.transposeA, attrs.transposeB);
+            makeDummyInputDims(srcShape, weiShape, dstShape, attrs.transposeA, attrs.transposeB);
         const auto& outDymmyDims = makeDummyOutputDims(inDymmyDims,
                                                        weiDymmyDims,
                                                        attrs.transposeA,
@@ -574,7 +664,8 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
                                               attrs.transposeB,
                                               false,
                                               useWeightsDecompression,
-                                              attrs.fcSemantic);
+                                              attrs.fcSemantic,
+                                              dynQuant);
 
     if (attrs.constantWeights && cacheWeights) {
         const auto weightsDesc = DnnlExtensionUtils::makeDescriptor(primDesc.weights_desc());
@@ -590,7 +681,10 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
 
     const auto defaultImpType = parse_impl_name(primDesc.impl_info_str());
 
-    return std::make_shared<DnnlShapeAgnosticData>(postOpData, defaultImpType);
+    return std::make_shared<DnnlShapeAgnosticData>(postOpData,
+                                                    defaultImpType,
+                                                    dynQuant,
+                                                    attrs.dynamicQuantizationGroupSize);
 }
 
 static impl_desc_type implTypeFromPrimDesc(const dnnl::primitive_desc& primDesc) {
@@ -620,8 +714,10 @@ DnnlMatMulPrimitive::DnnlMatMulPrimitive(const Key& key,
                                      key.transposeA,
                                      key.transposeB,
                                      false,
-                                     useWeightsDecompressionImpl(key.src->getPrecision(), key.wei->getPrecision()),
-                                     key.fcSemantic)),
+                                     useWeightsDecompressionImpl(key.src->getPrecision(), key.wei->getPrecision()) &&
+                                         !key.dynQuant,
+                                     key.fcSemantic,
+                                     key.dynQuant)),
       m_implType(implTypeFromPrimDesc(m_primDesc)),
       m_srcDesc(DnnlExtensionUtils::makeDescriptor(m_primDesc.src_desc())),
       m_weiDesc(DnnlExtensionUtils::makeDescriptor(m_primDesc.weights_desc())),

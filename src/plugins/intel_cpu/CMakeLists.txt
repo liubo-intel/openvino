@@ -336,6 +336,13 @@ cross_compiled_file(${TARGET_NAME}
 )
 cross_compiled_file(${TARGET_NAME}
         ARCH AVX512F AVX2 ANY
+                    src/nodes/kernels/dynamic_quant/dynamic_quant.cpp
+        API         src/nodes/kernels/dynamic_quant/dynamic_quant.hpp
+        NAME        quant_src_grouped_i8
+        NAMESPACE   ov::Extensions::Cpu::XARCH
+)
+cross_compiled_file(${TARGET_NAME}
+        ARCH AVX512F AVX2 ANY
                     src/nodes/kernels/scaled_attn/mha_kv_cache_codec.cpp
         API         src/nodes/kernels/scaled_attn/mha_kv_cache_codec.hpp
         NAME        mha_kv_cache turboq_head_bytes

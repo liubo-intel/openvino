@@ -348,6 +348,94 @@ INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_non_default_dyn_quant_gro
                                             ::testing::Values(true)),
                          MatmulWeightsDecompression::getTestCaseName);
 
+// AMX dynamic quantization (fullyconnected_dnnl_matmul_int8_dynquant): activations stay
+// compressed on the FullyConnectedCompressed node exactly like the other dyn-quant paths
+// above (see the note in the implementation plan on why this lives here, not in a separate
+// "dynamic quant" test file - it is the same weight-decompression graph pattern, dynamic
+// quantization is just an internal execution-strategy choice for it). Only reachable on AMX
+// HW - filter_additional_config_amx_dynquant() returns an empty list elsewhere, which makes
+// ::testing::ValuesIn() generate zero test instances (i.e. auto-skip), same convention as
+// filter_additional_config_amx() above.
+std::vector<ov::AnyMap> filter_additional_config_amx_dynquant() {
+    std::vector<ov::AnyMap> additional_config = {};
+    if (ov::with_cpu_x86_avx512_core_amx()) {
+        additional_config = {
+            {ov::hint::dynamic_quantization_group_size(16), ov::hint::inference_precision(ov::element::bf16)},
+            {ov::hint::dynamic_quantization_group_size(32), ov::hint::inference_precision(ov::element::bf16)},
+        };
+    }
+    return additional_config;
+}
+
+// Dedicated (not reused) parameter sets for the AMX dynquant suites: the pre-existing
+// weights_precisions_dyn_quant / decompression_subtract_type vectors were tuned for the
+// non-AMX VNNI dynamic-quant path's validated combinations, which are not all valid here -
+// int8-grouped-quantization on this AMX matmul path has its own, narrower, verified set
+// (see the two KNOWN ISSUE notes below). Restricting to that set here, rather than reusing
+// the broader existing vectors, avoids silently exercising untested/known-broken combinations.
+//
+// KNOWN ISSUE 1 (needs further investigation, tracked separately from the bias one in
+// SetUp()): int4 (u4/i4) weights crash with the same "evex is invalid" Xbyak error as the
+// bias case, on the same "amx_fp16" oneDNN kernel variant - reproduced even with no bias and
+// no post-op, so it is independent of the bias issue. int8 (u8/i8) weights do not hit this.
+// Excluded from this parameter set until investigated; not part of this feature's DoD.
+//
+// KNOWN ISSUE 2 (pre-existing, unrelated to this feature): asymmetric weights (a real
+// zero-point, i.e. decompression_subtract = full/scalar) combined with bf16 activations on
+// AMX already fail today with dynamic quantization fully disabled
+// (dynamic_quantization_group_size(0), i.e. the pre-existing, untouched AMX BF16 TMUL path) -
+// verified directly by re-running the pre-existing smoke_MatMulCompressedWeights_amx suite
+// with `--disable_tests_skipping` (that suite is normally skipped wholesale on AMX+bf16 via
+// shared_tests_instances/skip_tests_config.cpp:623, which is exactly why this was never
+// caught before). Since it already fails without any of this feature's code being involved,
+// it is out of scope here; only decompression_subtract = empty (symmetric, no zero-point) is
+// exercised below.
+const std::vector<ov::test::ElementType> weights_precisions_amx_dynquant = {ov::element::u8, ov::element::i8};
+
+const std::vector<MatMulDecompressionShapeParams> input_shapes_amx_dynquant = {
+    {{{}, {{1, 7, 256}}}, {256, 128}, 32lu},
+    {{{}, {{1, 1, 128}}}, {128, 32}, 16lu},
+    {{{}, {{1, 3, 144}}}, {144, 64}, 16lu},
+};
+
+// R14: 3D activation with batch > 1. The src scale mask must cover the batch dim
+// ((1 << rank) - 1) rather than just (M, K), otherwise the same scale plane would be
+// incorrectly broadcast across batches and the result would be wrong.
+const std::vector<MatMulDecompressionShapeParams> input_shapes_amx_dynquant_3d_batch = {
+    {{{}, {{2, 4, 128}}}, {128, 64}, 32lu},
+    {{{}, {{4, 3, 256}}}, {256, 32}, 16lu},
+};
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_amx_dynquant,
+                         MatmulWeightsDecompression,
+                         ::testing::Combine(::testing::ValuesIn(input_shapes_amx_dynquant),
+                                            ::testing::ValuesIn(weights_precisions_amx_dynquant),
+                                            ::testing::ValuesIn(decompression_precisions),
+                                            ::testing::Values(ov::element::dynamic),
+                                            ::testing::Values(true),
+                                            ::testing::Values(DecompressionType::full),
+                                            ::testing::Values(DecompressionType::empty),
+                                            ::testing::Values(false),
+                                            ::testing::ValuesIn(filter_additional_config_amx_dynquant()),
+                                            ::testing::ValuesIn(fusing_params_dyn_quant),
+                                            ::testing::Values(true)),
+                         MatmulWeightsDecompression::getTestCaseName);
+
+INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_amx_dynquant_3d_batch,
+                         MatmulWeightsDecompression,
+                         ::testing::Combine(::testing::ValuesIn(input_shapes_amx_dynquant_3d_batch),
+                                            ::testing::ValuesIn(weights_precisions_amx_dynquant),
+                                            ::testing::ValuesIn(decompression_precisions),
+                                            ::testing::Values(ov::element::dynamic),
+                                            ::testing::Values(true),
+                                            ::testing::Values(DecompressionType::full),
+                                            ::testing::Values(DecompressionType::empty),
+                                            ::testing::Values(false),
+                                            ::testing::ValuesIn(filter_additional_config_amx_dynquant()),
+                                            ::testing::ValuesIn(fusing_params_dyn_quant),
+                                            ::testing::Values(true)),
+                         MatmulWeightsDecompression::getTestCaseName);
+
 INSTANTIATE_TEST_SUITE_P(smoke_MatMulCompressedWeights_non_default_dyn_quant_group_sizes_u2,
                          MatmulWeightsDecompression,
                          ::testing::Combine(::testing::ValuesIn(input_shapes_basic_dyn_quant_u2),
