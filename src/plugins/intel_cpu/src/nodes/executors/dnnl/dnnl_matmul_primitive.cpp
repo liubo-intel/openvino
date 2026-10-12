@@ -114,6 +114,30 @@ static dimsType normalizeToRank(const dimsType& vec, size_t rank) {
     return result;
 }
 
+// Folds every leading dim of an activation/output shape into M: [d0, d1, ..., K] -> [d0*d1*..., K].
+template <typename dimsType>
+static dimsType collapseLeadingDimsIntoM(const dimsType& vec) {
+    if (vec.size() <= 2) {
+        return vec;
+    }
+    typename dimsType::value_type m = 1;
+    for (size_t i = 0; i + 1 < vec.size(); i++) {
+        m *= vec[i];
+    }
+    return dimsType{m, vec.back()};
+}
+
+// With FC semantics the weight has no batch dim, so every leading activation dim is just more rows
+// of the same GEMM. Passing oneDNN the rank-3 view [T, 1, K] x [1, K, N] instead makes it a *batched*
+// matmul with batch=T and M=1: brgemm then runs T separate M=1 problems (for the dynamic-quant
+// int8 grouped-quantization path measured ~40x slower than one M=T GEMM, e.g. 70 ms vs 1.8 ms for
+// 938x2048x8192) and the weights are re-read for every batch item. The dynamic-quant path therefore
+// hands oneDNN the collapsed 2D problem. Only done when no bias is present, as a bias would need the
+// same reshape.
+static bool collapseFcBatchIntoM(bool dynQuant, size_t srcRank, bool weightsHaveNoBatch, bool noBias) {
+    return dynQuant && srcRank > 2 && weightsHaveNoBatch && noBias;
+}
+
 std::shared_ptr<DnnlMatMulPrimitive> DnnlMatMulPrimitive::create(const MemoryArgs& memory,
                                                                  const MatMulAttrs& attrs,
                                                                  const ExecutorContext::CPtr context,
@@ -216,13 +240,21 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
     const auto& weiDesc = memory.at(ARG_WEI)->getDescPtr();
     const auto& dstDesc = memory.at(ARG_DST)->getDescPtr();
 
-    const auto& originalDims = dstDesc->getShape().getMinDims();
-    const auto& dims = originalDims;
-
     // AMX int8 grouped-quantization dynamic-quant path: the node keeps ARG_SRC at f32/bf16 (the
     // s8 conversion happens internally in the executor, see dnnl_executor.hpp), so this is
     // orthogonal to (and mutually exclusive with) the plain weight-decompression path below.
     const bool dynQuant = attrs.dynamicQuantizationGroupSize != 0;
+    // Must agree with the decision createDescriptorInternalAsFc() makes for the primitive itself:
+    // every rank/mask below has to describe the (possibly collapsed) 2D problem oneDNN sees.
+    const bool collapseBatch = attrs.fcSemantic &&
+                               collapseFcBatchIntoM(dynQuant,
+                                                    srcDesc->getShape().getRank(),
+                                                    weiDesc->getShape().getRank() == 2,
+                                                    memory.at(ARG_BIAS)->getDescPtr()->empty());
+
+    const auto& originalDims = dstDesc->getShape().getMinDims();
+    const auto dims = collapseBatch ? collapseLeadingDimsIntoM(originalDims) : originalDims;
+
     // fpmath_mode::any (the weight-decompression trick) must never be set together with the
     // dynamic-quant src scales attribute set below - this is a true int8 matmul, not an
     // upconvert-and-multiply. useWeightsDecompressionImpl() only looks at node-level src/wei
@@ -246,7 +278,8 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
 
     if (memory.count(ARG_WEI | ARG_ATTR_SCALES) != 0U) {
         const auto maxRank =
-            std::max({srcDesc->getShape().getRank(), weiDesc->getShape().getRank(), dstDesc->getShape().getRank()});
+            collapseBatch ? 2
+                          : std::max({srcDesc->getShape().getRank(), weiDesc->getShape().getRank(), dstDesc->getShape().getRank()});
         const auto normWeiDims = normalizeToRank(weiDesc->getShape().getStaticDims(), maxRank);
         if (auto it = memory.find(ARG_WEI | ARG_ATTR_SCALES); it != memory.end()) {
             auto dstPrc = ov::element::f32;
@@ -275,7 +308,7 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
         // full_tensor_mask()) so a batch dim (rank-3 activations) gets its own scale plane
         // rather than being broadcast across batches; groups only ever subdivide the last two
         // dims ({1, GK}), independent of rank.
-        const auto srcRank = srcDesc->getShape().getRank();
+        const size_t srcRank = collapseBatch ? 2 : srcDesc->getShape().getRank();
         const int srcScaleMask = (1 << srcRank) - 1;
         const auto groupSize = static_cast<dnnl::memory::dim>(attrs.dynamicQuantizationGroupSize);
         primAttrs.attr.set_scales(DNNL_ARG_SRC, srcScaleMask, {1, groupSize}, dnnl::memory::data_type::f32);
@@ -303,12 +336,28 @@ static dnnl::matmul::primitive_desc createDescriptorInternalAsFc(const dnnl::mem
     auto weiDims = weightDesc.get_dims();
     std::swap(weiDims[weiDims.size() - 1], weiDims[weiDims.size() - 2]);
 
+    // weightDesc may already be padded with leading 1s to the activation rank (dynamic-shape dummy
+    // dims), so "no batch" means every dim before the last two is 1.
+    const bool weightsHaveNoBatch =
+        std::all_of(weiDims.begin(), weiDims.end() - 2, [](const dnnl::memory::dim d) {
+            return d == 1;
+        });
+    const bool collapseBatch =
+        collapseFcBatchIntoM(dynQuant, inputDesc.get_ndims(), weightsHaveNoBatch, biasDesc.is_zero());
+
     const auto maxRank =
-        std::max({inputDesc.get_ndims(), weightDesc.get_ndims(), biasDesc.get_ndims(), outputDesc.get_ndims()});
-    const auto inpDims = normalizeToRank(inputDesc.get_dims(), maxRank);
+        collapseBatch ? 2
+                      : std::max({inputDesc.get_ndims(), weightDesc.get_ndims(), biasDesc.get_ndims(), outputDesc.get_ndims()});
+    const auto inpDims =
+        collapseBatch ? collapseLeadingDimsIntoM(inputDesc.get_dims()) : normalizeToRank(inputDesc.get_dims(), maxRank);
     const auto biaDims = normalizeToRank(biasDesc.get_dims(), maxRank);
-    const auto outDims = normalizeToRank(outputDesc.get_dims(), maxRank);
-    weiDims = normalizeToRank(weiDims, maxRank);
+    const auto outDims =
+        collapseBatch ? collapseLeadingDimsIntoM(outputDesc.get_dims()) : normalizeToRank(outputDesc.get_dims(), maxRank);
+    if (collapseBatch) {
+        weiDims = dnnl::memory::dims(weiDims.end() - 2, weiDims.end());
+    } else {
+        weiDims = normalizeToRank(weiDims, maxRank);
+    }
 
     const dnnl::memory::desc reshapedInputDesc = inputDesc.reshape(inpDims);
     // Under dynamic quantization the primitive descriptor's src is s8 (the executor quantizes
