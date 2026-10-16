@@ -73,6 +73,8 @@ public:
           cpuParallel(graphContext->getCpuParallel()) {
         auto cpuStreamsExecutor = graphContext->getCPUStreamExecutor();
         curNumaNodeId = std::max(0, cpuStreamsExecutor ? cpuStreamsExecutor->get_numa_node_id() : curNumaNodeId);
+        weightsInterleaveNumaNodes =
+            get_weights_interleave_numa_nodes(graphContext->getConfig().streamExecutorConfig.get_streams_info_table());
     }
 
     [[nodiscard]] MultiCachePtr getRuntimeCache() const {
@@ -101,6 +103,11 @@ public:
         return weightsCache;
     }
 
+    // NUMA nodes to interleave the weights over, empty if the memory policy must not be touched
+    [[nodiscard]] const std::vector<int>& getWeightsInterleaveNumaNodes() const {
+        return weightsInterleaveNumaNodes;
+    }
+
     [[nodiscard]] std::shared_ptr<CpuParallel> getCpuParallel() const {
         return cpuParallel;
     }
@@ -121,6 +128,7 @@ private:
     std::shared_ptr<std::unordered_map<std::string, MemoryPtr>> privateWeighCache;
     int numNumaNodes;
     int curNumaNodeId = -1;
+    std::vector<int> weightsInterleaveNumaNodes;
     std::shared_ptr<CpuParallel> cpuParallel;
 };
 

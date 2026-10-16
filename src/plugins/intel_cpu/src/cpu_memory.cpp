@@ -15,12 +15,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <oneapi/dnnl/dnnl_common.hpp>
+#include <set>
 #include <vector>
 
 #include "cpu_parallel.hpp"
@@ -35,6 +37,7 @@
 #include "openvino/core/type/bfloat16.hpp"
 #include "openvino/core/type/element_type.hpp"
 #include "openvino/runtime/system_conf.hpp"
+#include "openvino/runtime/threading/cpu_streams_info.hpp"
 #include "utils/debug_capabilities.h"
 #include "utils/general_utils.h"
 #if defined(__linux__)
@@ -561,8 +564,9 @@ void StaticMemory::StaticMemoryBlock::unregisterMemory(Memory* memPtr) {
 #if defined(__linux__) && !(defined(__ANDROID__) && defined(__aarch64__))
 #    define MPOL_DEFAULT   0
 #    define MPOL_BIND      2
-#    define MPOL_MF_STRICT (1 << 0)
-#    define MPOL_MF_MOVE   (1 << 1)
+#    define MPOL_INTERLEAVE 3
+#    define MPOL_MF_STRICT  (1 << 0)
+#    define MPOL_MF_MOVE    (1 << 1)
 #    if !defined(__NR_mbind)
 #        define NR_mbind 237
 #    else
@@ -604,11 +608,91 @@ bool mbind_move(void* data, size_t size, int targetNode) {
     }
     return true;
 }
+
+bool mbind_interleave_move(void* data, size_t size, const std::vector<int>& numaNodes) {
+    if (data == nullptr || numaNodes.size() < 2) {
+        return false;
+    }
+    uint64_t mask = 0;
+    for (const auto node : numaNodes) {
+        const int realNode = ov::get_org_numa_id(node);
+        if (realNode < 0 || realNode >= 64) {
+            return false;
+        }
+        mask |= 1UL << realNode;
+    }
+    // Only whole pages that lie inside the buffer are touched, so that neighbouring allocations
+    // sharing the edge pages keep their memory policy.
+    const auto pagesize = static_cast<uintptr_t>(getpagesize());
+    const auto begin = (reinterpret_cast<uintptr_t>(data) + pagesize - 1) & ~(pagesize - 1);
+    const auto end = (reinterpret_cast<uintptr_t>(data) + size) & ~(pagesize - 1);
+    if (end <= begin) {
+        return true;
+    }
+    const auto rc = mbind(reinterpret_cast<void*>(begin),  // NOLINT(performance-no-int-to-ptr)
+                          end - begin,
+                          MPOL_INTERLEAVE,
+                          &mask,
+                          sizeof(mask) * 8,
+                          MPOL_MF_MOVE);
+    if (rc < 0) {
+        DEBUG_LOG("mbind interleave failed: ", strerror(errno));
+        return false;
+    }
+    return true;
+}
 #else
 bool mbind_move(void* data, size_t size, int targetNode) {
     return false;
 }
+
+bool mbind_interleave_move(void* data, size_t size, const std::vector<int>& numaNodes) {
+    return false;
+}
 #endif
+
+std::vector<int> get_weights_interleave_numa_nodes(const std::vector<std::vector<int>>& streamsInfoTable) {
+#if defined(OPENVINO_ARCH_X86_64) && defined(__linux__)
+    // Automatic NUMA balancing migrates pages that are read from several nodes. Weights read by all the
+    // threads of a stream that spans NUMA nodes are such pages, and every migration stalls all the readers.
+    // With an explicit interleave policy the kernel leaves them alone. Without balancing there is nothing to
+    // avoid, so the memory is left as it is.
+    static const bool numaBalancing = [] {
+        std::ifstream f("/proc/sys/kernel/numa_balancing");
+        char c = '0';
+        return (f >> c) && c == '1';
+    }();
+    if (!numaBalancing || ov::get_num_numa_nodes() < 2) {
+        return {};
+    }
+    // Only a single stream that spans several NUMA nodes of one socket is handled. The rows with a zero
+    // number of streams describe where the threads of that stream are.
+    size_t nStreams = 0;
+    int socket = -1;
+    std::set<int> nodes;
+    for (const auto& row : streamsInfoTable) {
+        if (row.size() < CPU_STREAMS_TABLE_SIZE) {
+            return {};
+        }
+        if (row[NUMBER_OF_STREAMS] > 0) {
+            nStreams += row[NUMBER_OF_STREAMS];
+            continue;
+        }
+        if (row[STREAM_NUMA_NODE_ID] < 0 || row[STREAM_SOCKET_ID] < 0 ||
+            (socket >= 0 && socket != row[STREAM_SOCKET_ID])) {
+            return {};
+        }
+        socket = row[STREAM_SOCKET_ID];
+        nodes.insert(row[STREAM_NUMA_NODE_ID]);
+    }
+    if (nStreams != 1 || nodes.size() < 2) {
+        return {};
+    }
+    return {nodes.begin(), nodes.end()};
+#else
+    return {};
+#endif
+}
 
 bool mbind_move(const MemoryCPtr& mem, int numaNodeID) {
     void* data = mem->getData();

@@ -74,6 +74,12 @@ public:
                                             ov::element::Type weightsType,
                                             Config::ModelType modelType);
 
+    // Each thread reads its own part of the weights, nothing to spread over the NUMA nodes.
+    template <typename Attrs>
+    static bool readsWeightsFromAllThreads(const Attrs&) {
+        return false;
+    }
+
     static DnnlMemoryDescPtr makeTransposedWeightDescriptor(const DnnlMemoryDescPtr& srcDesc,
                                                             const DnnlMemoryDescPtr& dstDesc,
                                                             const FCAttrs& attrs);

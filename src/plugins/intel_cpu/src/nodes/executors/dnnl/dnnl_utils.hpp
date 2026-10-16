@@ -22,7 +22,8 @@ MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
                                const DnnlMemoryDescPtr& dstWeightDesc,
                                const MemoryCPtr& weightsMem,
                                const ExecutorContext::CPtr& context,
-                               bool needShiftSignedToUnsigned = false);
+                               bool needShiftSignedToUnsigned = false,
+                               bool interleaveAcrossNumaNodes = false);
 
 MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
                                const DnnlMemoryDescPtr& dstWeightDesc,
@@ -32,5 +33,6 @@ MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
                                const WeightsSharing::Ptr& globalWeightCache,
                                const std::shared_ptr<std::unordered_map<std::string, MemoryPtr>>& privateWeightCache,
                                const std::shared_ptr<ThreadPool>& threadPool,
-                               bool needShiftSignedToUnsigned = false);
+                               bool needShiftSignedToUnsigned = false,
+                               const std::vector<int>& interleaveNumaNodes = {});
 }  // namespace ov::intel_cpu::utils

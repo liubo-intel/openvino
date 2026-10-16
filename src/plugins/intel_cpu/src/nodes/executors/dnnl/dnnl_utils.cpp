@@ -142,19 +142,22 @@ MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
                                const DnnlMemoryDescPtr& dstWeightDesc,
                                const MemoryCPtr& weightsMem,
                                const ExecutorContext::CPtr& context,
-                               const bool needShiftSignedToUnsigned) {
+                               const bool needShiftSignedToUnsigned,
+                               const bool interleaveAcrossNumaNodes) {
     const auto privateWeightCache = context->getPrivateWeightCache();
     OPENVINO_ASSERT(privateWeightCache, "privateWeightCache is nullptr");
 
-    return prepareWeightsMemory(srcWeightDesc,
-                                dstWeightDesc,
-                                weightsMem,
-                                context->getEngine(),
-                                context->getRuntimeCache(),
-                                context->getWeightsCache(),
-                                privateWeightCache,
-                                context->getThreadPool(),
-                                needShiftSignedToUnsigned);
+    return prepareWeightsMemory(
+        srcWeightDesc,
+        dstWeightDesc,
+        weightsMem,
+        context->getEngine(),
+        context->getRuntimeCache(),
+        context->getWeightsCache(),
+        privateWeightCache,
+        context->getThreadPool(),
+        needShiftSignedToUnsigned,
+        interleaveAcrossNumaNodes ? context->getWeightsInterleaveNumaNodes() : std::vector<int>{});
 }
 
 MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
@@ -165,7 +168,8 @@ MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
                                const WeightsSharing::Ptr& globalWeightCache,
                                const std::shared_ptr<std::unordered_map<std::string, MemoryPtr>>& privateWeightCache,
                                const std::shared_ptr<ThreadPool>& threadPool,
-                               bool needShiftSignedToUnsigned) {
+                               bool needShiftSignedToUnsigned,
+                               const std::vector<int>& interleaveNumaNodes) {
     const auto format = dstWeightDesc->serializeFormat();
     if (privateWeightCache) {
         auto itr = privateWeightCache->find(format);
@@ -228,13 +232,25 @@ MemoryPtr prepareWeightsMemory(const DnnlMemoryDescPtr& srcWeightDesc,
         return _ptr;
     };
 
+    // Weights that all the threads of a stream read are interleaved over the NUMA nodes of the stream: pages read from
+    // several nodes are otherwise migrated by the kernel one by one, and every migration stalls all the readers.
+    // Small buffers are not worth it. A failure is not an error, the weights are fine with any placement.
+    constexpr size_t minInterleaveBytes = 1U << 20;
+    auto createAndPlace = [&]() {
+        auto weights = create();
+        if (!interleaveNumaNodes.empty() && weights->getSize() >= minInterleaveBytes) {
+            mbind_interleave_move(weights->getData(), weights->getSize(), interleaveNumaNodes);
+        }
+        return weights;
+    };
+
     MemoryPtr ptr;
     if (globalWeightCache && dnnl::memory::format_kind::blocked == dstWeightDesc->getDnnlDesc().get_format_kind()) {
         ptr = MemoryPtr(
             *globalWeightCache->findOrCreate(DnnlExtensionUtils::computeWeightsStringHash(weightsMem, dstWeightDesc),
-                                             create));
+                                             createAndPlace));
     } else {
-        ptr = create();
+        ptr = createAndPlace();
     }
 
     if (privateWeightCache) {

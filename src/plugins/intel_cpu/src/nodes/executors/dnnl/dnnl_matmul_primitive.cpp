@@ -725,7 +725,12 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
         }
 
         // ignore the result since we just need to put the packed weights into the cache
-        (void)utils::prepareWeightsMemory(originalWeightsDesc, weightsDesc, memory.at(ARG_WEI), context);
+        (void)utils::prepareWeightsMemory(originalWeightsDesc,
+                                          weightsDesc,
+                                          memory.at(ARG_WEI),
+                                          context,
+                                          false,
+                                          readsWeightsFromAllThreads(attrs));
     }
 
     const auto defaultImpType = parse_impl_name(primDesc.impl_info_str());

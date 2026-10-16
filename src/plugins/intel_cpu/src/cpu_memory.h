@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "cpu_parallel.hpp"
 #include "cpu_types.h"
@@ -448,6 +449,20 @@ using StringMemoryPtr = std::shared_ptr<StringMemory>;
 bool mbind_move(void* data, size_t size, int targetNode);
 bool mbind_move(const MemoryCPtr& mem, int numaNodeID);
 bool mbind_move(const dnnl::memory& mem, int numaNodeID);
+
+/**
+ * @brief Interleaves the pages of the buffer over the given NUMA nodes (MPOL_INTERLEAVE) and moves the pages that
+ * are already allocated. Returns false if it is not supported or failed; the buffer is usable in any case.
+ */
+bool mbind_interleave_move(void* data, size_t size, const std::vector<int>& numaNodes);
+
+/**
+ * @brief NUMA nodes over which the weights read by all the threads of the stream have to be interleaved.
+ * Returns an empty vector, which means "do not touch the memory policy", unless the only stream spans several NUMA
+ * nodes of one socket and automatic NUMA balancing is on.
+ * @param streamsInfoTable streams information table of the stream executor configuration
+ */
+std::vector<int> get_weights_interleave_numa_nodes(const std::vector<std::vector<int>>& streamsInfoTable);
 
 MemoryPtr split_horizontal(const dnnl::engine& eng,
                            const MemoryPtr& src,

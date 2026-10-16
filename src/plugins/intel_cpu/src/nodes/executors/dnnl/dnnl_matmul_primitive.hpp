@@ -84,6 +84,13 @@ public:
                                                             const ExecutorContext::CPtr& context,
                                                             bool cacheWeights);
 
+    // The grouped dynamic-quantization matmul reads every weights page from all the threads of the stream (each of
+    // them copies its own B blocks), such weights are interleaved over the NUMA nodes of the stream.
+    template <typename Attrs>
+    static bool readsWeightsFromAllThreads(const Attrs& attrs) {
+        return attrs.dynamicQuantizationGroupSize != 0;
+    }
+
     static DnnlMemoryDescPtr makeTransposedWeightDescriptor(const DnnlMemoryDescPtr& srcDesc,
                                                             const DnnlMemoryDescPtr& dstDesc,
                                                             const MatMulAttrs& attrs);
