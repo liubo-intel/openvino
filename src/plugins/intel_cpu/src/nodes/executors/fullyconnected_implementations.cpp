@@ -501,9 +501,25 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
                     return false;
                 }
 
-                // The decoding-shape / small-M gate is intentionally not implemented yet: the
-                // threshold depends on perf data gathered on real models (see the
-                // implementation plan's P5 phase), which is out of scope for this change.
+                // Decode (M == 1) falls back to the legacy fullyconnected_dnnl (inner_product): its weights are
+                // pre-packed once and read directly, whereas the matmul int4 path has to expand u4 -> s8
+                // into a buffer on every call (brgemm_matmul only supports plain int4 weights). For
+                // bf16 activations the legacy executor then runs the AVX512-VNNI dynamic quantization,
+                // see isAmxDecodeFallbackDq() in dnnl_fullyconnected_primitive.cpp.
+                // Note the fallback uses a different (packed) weights layout than this executor, so the
+                // weights are kept twice (measured: ~+500 MB on llama-3.2-1b).
+                // Only static shapes can be judged here; dynamic ones are probed once at compile time.
+                if (const auto& srcShape = memory.at(ARG_SRC)->getShape(); srcShape.isStatic()) {
+                    const auto& srcDims = srcShape.getStaticDims();
+                    size_t m = 1;
+                    for (size_t i = 0; i + 1 < srcDims.size(); i++) {
+                        m *= srcDims[i];
+                    }
+                    constexpr size_t minM = 2;
+                    if (m < minM) {
+                        return false;
+                    }
+                }
                 return true;
             },
             // create

@@ -6,6 +6,7 @@
 
 #include <oneapi/dnnl/dnnl_types.h>
 
+#include <algorithm>
 #include <cassert>
 #include <common/primitive_attr.hpp>
 #include <common/primitive_hashing.hpp>
@@ -158,10 +159,54 @@ bool DnnlFCPrimitive::useWeightsDecompressionImpl(const ov::element::Type inputT
     return false;
 }
 
+// Decode fallback of the AMX int8 dynamic-quant executor (fullyconnected_dnnl_matmul_int8_dynquant):
+// that executor does not accept M == 1 (see its acceptsShapes()), so decode steps of the layers it
+// serves land here. For those layers - bf16 activation, grouped int4 weights, no bias, on an
+// AMX-capable CPU - run the legacy inner_product with the AVX512-VNNI dynamic quantization instead of
+// the plain bf16 weights-decompression path: oneDNN's inner_product does not use AMX for M <= 4 with
+// weights decompression anyway (jit_brgemm_inner_product_utils.cpp: "immediate" algorithm).
+// The src quantization group is raised to the weights' own group (and at least kAmxDecodeFallbackMinGroup),
+// mirroring the effective group size the AMX executor uses for prefill. Layers outside this set (e.g.
+// per-channel u8 weights such as lm_head, or layers with bias) keep the previous behavior.
+constexpr size_t kAmxDecodeFallbackMinGroup = 128;
+
+static bool isAmxDecodeFallbackDq(const FCAttrs& attrs,
+                                  const MemoryDescPtr& srcDesc,
+                                  const MemoryDescPtr& weightsDesc,
+                                  const MemoryArgs& memory) {
+    if (attrs.dynamicQuantizationGroupSize == 0 || !ov::with_cpu_x86_avx512_core_amx() ||
+        !ov::with_cpu_x86_bfloat16() || srcDesc->getPrecision() != ov::element::bf16 ||
+        none_of(weightsDesc->getPrecision(), ov::element::u4, ov::element::i4)) {
+        return false;
+    }
+    if (const auto biasIt = memory.find(ARG_BIAS); biasIt != memory.end() && !biasIt->second->getDesc().empty()) {
+        return false;
+    }
+    const auto scalesIt = memory.find(ARG_WEI | ARG_ATTR_SCALES);
+    if (scalesIt == memory.end() || scalesIt->second->getShape().getRank() < 2) {
+        return false;
+    }
+    return scalesIt->second->getShape().getStaticDims()[1] > 1;  // grouped along IC
+}
+
+static size_t effectiveDqGroupSize(const FCAttrs& attrs,
+                                   const MemoryDescPtr& srcDesc,
+                                   const MemoryDescPtr& weightsDesc,
+                                   const MemoryArgs& memory) {
+    auto groupSize = static_cast<size_t>(attrs.dynamicQuantizationGroupSize);
+    if (isAmxDecodeFallbackDq(attrs, srcDesc, weightsDesc, memory)) {
+        const auto ic = weightsDesc->getShape().getStaticDims()[1];
+        const auto groupsNum = memory.at(ARG_WEI | ARG_ATTR_SCALES)->getShape().getStaticDims()[1];
+        groupSize = std::max({groupSize, ic / groupsNum, kAmxDecodeFallbackMinGroup});
+    }
+    return groupSize;
+}
+
 static bool useDynamicQuantizationImpl(size_t dqGroupSize,
                                        const MemoryDescPtr& srcDesc,
                                        const MemoryDescPtr& weightsDesc,
-                                       const MemoryArgs& memory) {
+                                       const MemoryArgs& memory,
+                                       bool allowOnAmx = false) {
     if (dqGroupSize == 0) {
         return false;
     }
@@ -174,8 +219,9 @@ static bool useDynamicQuantizationImpl(size_t dqGroupSize,
             return false;
         }
         // On AMX-capable HW, AMX BF16 TMUL outperforms VNNI int8 dyn-quant for bf16 src.
-        // Disable the bf16 dyn-quant entry here so the AMX BF16 path stays in use.
-        if (ov::with_cpu_x86_avx512_core_amx()) {
+        // Disable the bf16 dyn-quant entry here so the AMX BF16 path stays in use - except for the
+        // decode fallback of the AMX dynamic-quant executor (see isAmxDecodeFallbackDq()).
+        if (ov::with_cpu_x86_avx512_core_amx() && !allowOnAmx) {
             return false;
         }
     } else if (srcPrecision == ov::element::f32) {
@@ -294,7 +340,7 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const FCAttrs& attrs,
                                                         !attrs.weightsNonTransposed,
                                                         ov::element::u8);
         }
-        dnnlpoc.setDynamicQuantizationParams(attrs.dynamicQuantizationGroupSize);
+        dnnlpoc.setDynamicQuantizationParams(effectiveDqGroupSize(attrs, srcDesc, weiDesc, memory));
     }
 
     return dnnlpoc.compose();
@@ -432,7 +478,11 @@ DnnlShapeAgnosticDataPtr DnnlFCPrimitive::createShapeAgnosticData(const FCAttrs&
         useWeightsDecompressionImpl(srcDesc->getPrecision(), weiDesc->getPrecision(), attrs.modelType);
     const auto useDynamicQuantization =
         useWeightsDecompression &&
-        useDynamicQuantizationImpl(attrs.dynamicQuantizationGroupSize, srcDesc, weiDesc, memory);
+        useDynamicQuantizationImpl(effectiveDqGroupSize(attrs, srcDesc, weiDesc, memory),
+                                   srcDesc,
+                                   weiDesc,
+                                   memory,
+                                   isAmxDecodeFallbackDq(attrs, srcDesc, weiDesc, memory));
 
     const auto postOpData = createPrimitiveAttrs(attrs, memory, context, useDynamicQuantization);
 
