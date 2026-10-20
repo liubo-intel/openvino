@@ -516,9 +516,17 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
                         m *= srcDims[i];
                     }
                     constexpr size_t minM = 2;
-                    if (m < minM) {
+                    // if (m < minM) {
+                    //     return false;
+                    // }
+
+                    // TEMP for Debug: set to false to keep decode (M == 1) on this matmul executor instead of falling back
+                    // to the legacy inner_product, e.g. to compare the two paths.
+                    constexpr bool kDecodeFallbackToInnerProduct = true;
+                    if (kDecodeFallbackToInnerProduct && m < minM) {
                         return false;
                     }
+
                 }
                 return true;
             },
