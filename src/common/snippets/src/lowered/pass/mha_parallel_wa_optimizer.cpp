@@ -91,6 +91,7 @@ bool is_prime_number(size_t value) {
 
 const size_t MHAParallelWAOptimizer::m_dim_M_idx = 1;
 const size_t MHAParallelWAOptimizer::m_min_kernel_m = 32;
+const size_t MHAParallelWAOptimizer::m_min_kernel_m_relaxed = 16;
 
 MHAParallelWAOptimizer::MHAParallelWAOptimizer(const lowered::LinearIRCPtr& linear_ir,
                                                const RuntimeConfigurator* configurator)
@@ -303,6 +304,20 @@ bool MHAParallelWAOptimizer::split(const ov::Shape& shape,
     if (batch_dim < optimal_parallelism_work_amount) {
         std::tie(batch_m_dim, new_m_dim) =
             split_fallback_increase_parallel_wa(batch_dim, m_dim, optimal_parallelism_work_amount);
+        if (split_is_done()) {
+            return true;
+        }
+        // Last resort for insufficient batch: allow smaller kernel M if M can't be split into kernels
+        // not less than 'm_min_kernel_m' at all (the largest proper divisor of M is less than 'm_min_kernel_m').
+        // E.g. ViT windowed attention with M = 145 (144 patches + cls token) can be split only as 5 x 29.
+        size_t smallest_divisor = 2;
+        while (smallest_divisor < m_dim && m_dim % smallest_divisor != 0) {
+            ++smallest_divisor;
+        }
+        if (m_dim / smallest_divisor < m_min_kernel_m) {
+            std::tie(batch_m_dim, new_m_dim) =
+                split_minimize_kernel_wa(batch_dim, m_dim, optimal_parallelism_work_amount, m_min_kernel_m_relaxed);
+        }
     }
     return split_is_done();
 }
@@ -356,26 +371,27 @@ std::pair<size_t, size_t> MHAParallelWAOptimizer::split_fallback_increase_parall
 
 std::pair<size_t, size_t> MHAParallelWAOptimizer::split_minimize_kernel_wa(size_t batch_dim,
                                                                            size_t m_dim,
-                                                                           size_t optimal_parallelism_work_amount) {
+                                                                           size_t optimal_parallelism_work_amount,
+                                                                           size_t min_kernel_m) {
     // This heuristic minimizes 'm_kernel' (=> maximizes 'm_batch') with a limitation that 'm_kernel >= min_kernel_m'.
-    // In other words, it tries to find 'm_kernel' bigger than 'm_min_kernel_m' and at the same time as close as
+    // In other words, it tries to find 'm_kernel' bigger than 'min_kernel_m' and at the same time as close as
     // possible to this value.
     std::pair<size_t, size_t> best_result = {1, m_dim};
     for (size_t divisor = 2; divisor < std::sqrt(m_dim); ++divisor) {
         if (m_dim % divisor != 0) {
             continue;
         }
-        // If divisor is more than 'm_min_kernel_m', divisor becomes 'm_kernel',
+        // If divisor is more than 'min_kernel_m', divisor becomes 'm_kernel',
         // guaranteeing the most optimal implementation from 'm_kernel' minimization perspective.
-        if (divisor >= m_min_kernel_m) {
+        if (divisor >= min_kernel_m) {
             return std::make_pair(m_dim / divisor, divisor);
         }
 
-        // If divisor is less than 'm_min_kernel_m', divisor becomes m_batch.
+        // If divisor is less than 'min_kernel_m', divisor becomes m_batch.
         // However, it is not guaranteed that the current 'm_kernel = m_dim / divisor' is minimized, as one of the next
         // divisors can be more optimal. So in this case the best result is remembered
         const size_t m_kernel = m_dim / divisor;
-        if (m_kernel >= m_min_kernel_m) {
+        if (m_kernel >= min_kernel_m) {
             best_result.first = divisor;
             best_result.second = m_kernel;
         }

@@ -71,11 +71,12 @@ private:
                                                    size_t optimal_parallelism_work_amount);
     /**
      * @brief Splits m_dim to minimize kernel_m in order to reduce waiting time for idle threads at the last
-     * parallel loop iteration.
+     * parallel loop iteration. The resulting kernel_m is not less than min_kernel_m.
      */
     static std::pair<size_t, size_t> split_minimize_kernel_wa(size_t batch_dim,
                                                               size_t m_dim,
-                                                              size_t optimal_parallelism_work_amount);
+                                                              size_t optimal_parallelism_work_amount,
+                                                              size_t min_kernel_m = m_min_kernel_m);
     /**
      * @brief Splits m_dim to get the batch in (optimal_parallelism_work_amount, 2 *
      * optimal_parallelism_work_amount) interval
@@ -101,6 +102,8 @@ private:
 
     static const size_t m_dim_M_idx;
     static const size_t m_min_kernel_m;
+    // Lower bound of kernel_m used only as the last resort when the batch is less than the optimal work amount
+    static const size_t m_min_kernel_m_relaxed;
 };
 
 }  // namespace ov::snippets::lowered::pass

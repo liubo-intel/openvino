@@ -621,6 +621,8 @@ set(CPU_PLUGIN_SRCS
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/ngram_fusion.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/permute_slice_n_interpolation.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/permute_slice_n_interpolation.hpp
+    ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/reshape_mvn_last_axis_to_3d.cpp
+    ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/reshape_mvn_last_axis_to_3d.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/rnn_sequences_optimization.cpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/rnn_sequences_optimization.hpp
     ${CPU_SRC_DIR}/transformations/cpu_opset/common/pass/stateful_sdpa_fusion.cpp
