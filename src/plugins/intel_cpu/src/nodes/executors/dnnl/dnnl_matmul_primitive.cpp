@@ -466,6 +466,9 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
         const bool first_match = implPriorities.front() == impl_desc_type::unknown;
 
         auto cur_desc = createDescriptor();
+        OPENVINO_ASSERT(cur_desc, "Failed to create matmul primitive descriptor");
+        // for_each_implementation() advances cur_desc, keep oneDNN's first choice for the fallback below
+        auto first_desc = dnnl::matmul::primitive_desc(cur_desc.get());
 
         DnnlExtensionUtils::for_each_implementation(
             cur_desc,
@@ -484,15 +487,12 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
                 }
             });
 
-        // None of the enumerated implementations matched an entry in implPriorities (e.g. a
-        // brand-new impl name for a shape/attr combination implPriorities was never updated
-        // for) - fall back to oneDNN's own default choice for this descriptor rather than
-        // silently returning an empty primitive_desc, mirroring the fallback the non-undef
-        // branch below already does (found ? prim_desc : first_desc).
+        // None of the enumerated implementations is in implPriorities: fall back to oneDNN's own first choice
+        // rather than returning an empty primitive_desc, like the branch below does (found ? prim_desc : first_desc).
         if (prim_desc_w_priority.prim_desc) {
             return prim_desc_w_priority.prim_desc;
         }
-        return cur_desc;
+        return std::move(first_desc);
     }
 
     auto prim_desc = createDescriptor();

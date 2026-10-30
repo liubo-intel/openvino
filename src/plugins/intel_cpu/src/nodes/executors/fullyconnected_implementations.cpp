@@ -419,11 +419,6 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
                 VERIFY(ov::with_cpu_x86_avx512_core_amx(), UNSUPPORTED_ISA);
                 VERIFY(config.attrs.dynamicQuantizationGroupSize != 0, HEURISTICS_MISMATCH);
                 VERIFY(any_of(srcType(config), f32, bf16), UNSUPPORTED_SRC_PRECISIONS);
-                // TEMP (dispatch experiment): int4 (u4/i4) re-enabled to check whether real
-                // models reach this kernel at all. Previously excluded because it was verified
-                // (via ONEDNN_VERBOSE) to crash with an Xbyak "evex is invalid" encoding error
-                // on HW that selects the "amx_fp16" brgemm_matmul kernel variant, reproduced
-                // with no bias and no post-op. Needs further investigation before shipping.
                 VERIFY(any_of(weiType(config), i8, u8, i4, u4), UNSUPPORTED_WEI_PRECISIONS);
                 VERIFY(any_of(dstType(config), f32, bf16), UNSUPPORTED_DST_PRECISIONS);
                 VERIFY(weiRank(config) == 2U, UNSUPPORTED_WEI_RANK);
@@ -468,35 +463,20 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
                     }
                 }
 
-                // Asymmetric weights (real zero-points) are rejected only when the
-                // zero-point is NOT grouped along K (group size == ic, i.e. one zero-point per
-                // whole K / per-OC). Verified via ONEDNN_VERBOSE that this specific combination
-                // forces oneDNN's brgemm_matmul into its per-(M,N) compensation-based
-                // asymmetric-quantization path, which requires a non-blocked (strided) weight
-                // layout - incompatible with this executor's mandatory AMX blocked weight
-                // layout, so oneDNN silently falls back to the scalar ref_int8 kernel
-                // (measured: ~443ms/call for a 2048x128256 lm_head weight, vs microseconds for
-                // the AMX path - dominates decode-step latency). K-grouped zero-points
-                // (group size < ic) are unaffected and keep dispatching to the AMX brgemm
-                // kernel, so only the ungrouped case is excluded here.
-                // TODO: remove this restriction once oneDNN supports an efficient (e.g.
-                // compensation-based) asymmetric zero-point path for non-K-grouped
-                // zero-points with a blocked weight layout.
+                // Weight zero-points stay on oneDNN's AMX brgemm path only for int4 weights, where they are subtracted
+                // while B is copied into the int8 buffer. With 8-bit weights (blocked layout) any zero-point, per-N or
+                // K-grouped, makes oneDNN fall back to ref_int8 (verified with benchdnn), and a single common
+                // zero-point is not supported either - leave those to the inner_product.
                 if (auto zpIt = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS); zpIt != memory.end()) {
-                    const auto& zpDims = zpIt->second->getShape().getStaticDims();
-                    const bool isKGrouped = zpDims.size() > 1 && zpDims[1] != 1;
-                    if (!isKGrouped) {
+                    const bool commonZeroPoint = zpIt->second->getShape().getElementsCount() == 1;
+                    if (any_of(weiDesc->getPrecision(), ov::element::u8, ov::element::i8) || commonZeroPoint) {
                         return false;
                     }
                 }
 
-                // Bias is excluded for now: verified (via ONEDNN_VERBOSE) that a bias
-                // combined with int8 grouped-quantization attributes crashes with the same
-                // "evex is invalid" Xbyak encoding error as the int4-weights case above, on HW
-                // that selects the "amx_fp16" brgemm_matmul kernel variant. The crash happens
-                // during primitive/kernel creation, so it must be prevented here rather than
-                // left to fail at compile_model() time. Needs further investigation; tracked as
-                // a known issue, not part of this feature's v1 DoD.
+                // A bias is not supported: the batch dims of the src cannot be folded into M then (see
+                // collapseFcBatchIntoM() in dnnl_matmul_primitive.cpp), and a bf16 bias with int4 weights makes
+                // oneDNN fall back to ref_int8.
                 if (!memory.at(ARG_BIAS)->getDesc().empty()) {
                     return false;
                 }

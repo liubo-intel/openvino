@@ -186,7 +186,25 @@ static bool isAmxDecodeFallbackDq(const FCAttrs& attrs,
     if (scalesIt == memory.end() || scalesIt->second->getShape().getRank() < 2) {
         return false;
     }
-    return scalesIt->second->getShape().getStaticDims()[1] > 1;  // grouped along IC
+    const auto groupsNum = scalesIt->second->getShape().getStaticDims()[1];
+    if (groupsNum <= 1) {  // not grouped along IC
+        return false;
+    }
+    // The shape-agnostic decision cannot look at M, so mirror the conditions under which the AMX executor takes the
+    // layer for M > 1 (its supports()/acceptsShapes()). Otherwise this executor runs the prefill too and must keep the
+    // AMX path.
+    const auto dqGroupSize = static_cast<size_t>(attrs.dynamicQuantizationGroupSize);
+    const auto ic = weightsDesc->getShape().getStaticDims()[1];
+    const auto weiGroupSize = ic / groupsNum;
+    if (dqGroupSize % 16 != 0 || ic % dqGroupSize != 0 ||
+        (weiGroupSize % dqGroupSize != 0 && dqGroupSize % weiGroupSize != 0)) {
+        return false;
+    }
+    if (const auto zpIt = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS);
+        zpIt != memory.end() && zpIt->second->getShape().getElementsCount() == 1) {
+        return false;
+    }
+    return true;
 }
 
 static size_t effectiveDqGroupSize(const FCAttrs& attrs,

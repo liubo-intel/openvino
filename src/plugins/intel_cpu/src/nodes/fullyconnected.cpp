@@ -96,17 +96,10 @@ ov::element::TypeVector FullyConnected::getSupportedCompressedActivationsTypes()
         return {Type_t::f32, Type_t::f16};
     }
 #if defined(OPENVINO_ARCH_X86_64)
-    // bf16 compressed-activations are consumed by two different execution
-    // paths depending on the platform:
-    //  - non-AMX: the SIMD (avx512_vnni/avx2_vnni) inner_product dynamic-quant
-    //    kernel (dnnl_fullyconnected_primitive.cpp's useDynamicQuantizationImpl).
-    //  - AMX: either the AMX BF16 TMUL path (dynamic quantization disabled) or,
-    //    when dynamic quantization is requested and the weights/group-size are
-    //    compatible, the new AMX int8 grouped-quantization dnnl::matmul path
-    //    (fullyconnected_dnnl_matmul_int8_dynquant, gated in
-    //    isSupportedCompressedOperation() below). Both cases keep the node's
-    //    materialized activation type at bf16 - the s8 conversion happens
-    //    internally inside the executor and is not a node-visible precision.
+    // bf16 compressed activations are consumed by dynamic-quantization kernels: the SIMD (avx512_vnni/avx2_vnni)
+    // inner_product one on non-AMX HW, and the AMX int8 grouped-quantization dnnl::matmul
+    // (fullyconnected_dnnl_matmul_int8_dynquant) on AMX. The latter depends on the config, so on AMX the type is
+    // admitted here and filtered in isSupportedCompressedOperation().
     return {Type_t::f32, Type_t::bf16};
 #elif defined(OV_CPU_WITH_KLEIDIAI)
     return {Type_t::f32};
@@ -162,44 +155,35 @@ bool FullyConnected::isSupportedCompressedOperation([[maybe_unused]] const std::
             return false;
         }
 
-        if (ov::with_cpu_x86_avx512_core_amx() && config.inferencePrecision == ov::element::bf16) {
-            // bf16 activation reaches this point on AMX only because
-            // getSupportedCompressedActivationsTypes() now admits it unconditionally (it has no
-            // access to per-request config to gate on dynamic quantization itself). Do the
-            // finer-grained gating here instead, where `config` is available.
-            const bool dynQuantRequested = config.fcDynamicQuantizationGroupSize != 0;
-            const auto weightsPrecision = op->get_input_element_type(WEIGHTS);
-            const bool dynQuantCompatibleWeights =
-                any_of(weightsPrecision, ov::element::u8, ov::element::i8, ov::element::u4, ov::element::i4);
-
-            if (dynQuantRequested && dynQuantCompatibleWeights) {
-                // Candidate for the new AMX int8 grouped-quantization dnnl::matmul path
-                // (fullyconnected_dnnl_matmul_int8_dynquant). That executor does not share the
-                // AMX inner_product shape limitations checked below, so they are skipped here;
-                // the actual dispatch decision (incl. group-size/scale constraints) is made by
-                // that executor's own supports()/acceptsShapes() gates.
-            } else if (!dynQuantRequested) {
-                // Dynamic quantization not requested: preserve the previous behavior of
-                // rejecting bf16-activation compressed FC on AMX (before
-                // getSupportedCompressedActivationsTypes() started returning bf16 on AMX, such a
-                // node could never be created here in the first place), so the existing AMX
-                // BF16 TMUL path for uncompressed weights is unaffected.
+        if (ov::with_cpu_x86_avx512_core_amx()) {
+            // getSupportedCompressedActivationsTypes() admits bf16 activations on AMX because it has no access to the
+            // config. They are only meant for the AMX int8 dynamic-quantization matmul
+            // (fullyconnected_dnnl_matmul_int8_dynquant); without dynamic quantization, or with weights that executor
+            // does not take, keep the previous behavior of not compressing such an FC.
+            const bool dynQuantCandidate =
+                config.fcDynamicQuantizationGroupSize != 0 && any_of(op->get_input_element_type(WEIGHTS),
+                                                                     ov::element::u8,
+                                                                     ov::element::i8,
+                                                                     ov::element::u4,
+                                                                     ov::element::i4);
+            if (op->get_input_element_type(DATA) == ov::element::bf16 && !dynQuantCandidate) {
                 return false;
-            } else {
-                // Dynamic quantization was requested but this weights type does not support the
-                // new AMX int8 path (e.g. nf4/f4e2m1/u2): fall back to letting this node compete
-                // for the existing AMX inner_product weights-decompression path instead.
-                // OneDNN AMX IP implementation has limited shapes support due to performance considerations. As a
-                // current solution conditions below are copied from OneDNN to make sure correct IP impl will be
-                // used since fallback one doesn't support weights decompression feature.
-                size_t simdWidth = 16;
-                size_t vnniFactor = 2;
-                size_t maxSize = 512;
-                auto amxRow = vnniFactor * simdWidth;
+            }
+        }
 
-                if ((IC <= amxRow && OC <= amxRow) || (IC <= maxSize && OC <= maxSize && IC % amxRow != 0)) {
-                    return false;
-                }
+        if (ov::with_cpu_x86_avx512_core_amx() && config.inferencePrecision == ov::element::bf16) {
+            // OneDNN AMX IP implementation has limited shapes support due to performance considerations. As a
+            // current solution conditions below are copied from OneDNN to make sure correct IP impl will be
+            // used since fallback one doesn't support weights decompression feature.
+            // The IP stays the fallback of the dynamic-quantization matmul (decode, unsupported configurations), so
+            // the limits apply to its candidates too.
+            size_t simdWidth = 16;
+            size_t vnniFactor = 2;
+            size_t maxSize = 512;
+            auto amxRow = vnniFactor * simdWidth;
+
+            if ((IC <= amxRow && OC <= amxRow) || (IC <= maxSize && OC <= maxSize && IC % amxRow != 0)) {
+                return false;
             }
         }
 
