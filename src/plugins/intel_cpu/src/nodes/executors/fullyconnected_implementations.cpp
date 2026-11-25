@@ -410,7 +410,7 @@ const std::vector<ExecutorImplementation<FCAttrs>>& getImplementations() {
             AcceptsAnyShape<FCAttrs>,
             CreateDefault<MatMulKleidiAIExecutor, FCAttrs>{}
             )
-        OV_CPU_INSTANCE_DNNL(
+        OV_CPU_INSTANCE_DNNL_X64(
             "fullyconnected_dnnl_matmul_int8_dynquant",
             ExecutorType::Dnnl,
             OperationType::MatMul,

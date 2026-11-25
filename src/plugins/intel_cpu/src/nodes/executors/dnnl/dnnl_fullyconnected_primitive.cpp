@@ -168,6 +168,8 @@ bool DnnlFCPrimitive::useWeightsDecompressionImpl(const ov::element::Type inputT
 // The src quantization group is raised to the weights' own group (and at least kAmxDecodeFallbackMinGroup),
 // mirroring the effective group size the AMX executor uses for prefill. Layers outside this set (e.g.
 // per-channel u8 weights such as lm_head, or layers with bias) keep the previous behavior.
+
+// TODO: maybe not need this kAmxDecodeFallbackMinGroup to (align) use prefill effectiveGroupSize
 constexpr size_t kAmxDecodeFallbackMinGroup = 128;
 
 static bool isAmxDecodeFallbackDq(const FCAttrs& attrs,

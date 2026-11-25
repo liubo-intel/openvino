@@ -134,7 +134,15 @@ static dimsType collapseLeadingDimsIntoM(const dimsType& vec) {
 // 938x2048x8192) and the weights are re-read for every batch item. The dynamic-quant path therefore
 // hands oneDNN the collapsed 2D problem. Only done when no bias is present, as a bias would need the
 // same reshape.
-static bool collapseFcBatchIntoM(bool dynQuant, size_t srcRank, bool weightsHaveNoBatch, bool noBias) {
+// Both createPrimitiveAttrs() and createDescriptorInternalAsFc() must reach the same decision, so the
+// "weight has no batch" check is done here from the raw weight dims: the weight may already be padded
+// with leading 1s to the activation rank, so "no batch" means every dim before the last two is 1.
+template <typename dimsType>
+static bool collapseFcBatchIntoM(bool dynQuant, size_t srcRank, const dimsType& weiDims, bool noBias) {
+    const bool weightsHaveNoBatch =
+        weiDims.size() <= 2 || std::all_of(weiDims.begin(), weiDims.end() - 2, [](const auto d) {
+            return d == 1;
+        });
     return dynQuant && srcRank > 2 && weightsHaveNoBatch && noBias;
 }
 
@@ -244,12 +252,13 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
     // s8 conversion happens internally in the executor, see dnnl_executor.hpp), so this is
     // orthogonal to (and mutually exclusive with) the plain weight-decompression path below.
     const bool dynQuant = attrs.dynamicQuantizationGroupSize != 0;
-    // Must agree with the decision createDescriptorInternalAsFc() makes for the primitive itself:
-    // every rank/mask below has to describe the (possibly collapsed) 2D problem oneDNN sees.
+    // Must agree with the decision createDescriptorInternalAsFc() makes for the primitive itself (both go
+    // through collapseFcBatchIntoM()): every rank/mask below has to describe the (possibly collapsed) 2D
+    // problem oneDNN sees.
     const bool collapseBatch = attrs.fcSemantic &&
                                collapseFcBatchIntoM(dynQuant,
                                                     srcDesc->getShape().getRank(),
-                                                    weiDesc->getShape().getRank() == 2,
+                                                    weiDesc->getShape().getMinDims(),
                                                     memory.at(ARG_BIAS)->getDescPtr()->empty());
 
     const auto& originalDims = dstDesc->getShape().getMinDims();
@@ -288,10 +297,13 @@ static DnnlPrimitiveAttrs createPrimitiveAttrs(const MatMulAttrs& attrs,
         if (auto it = memory.find(ARG_WEI | ARG_ATTR_ZERO_POINTS); it != memory.end()) {
             auto zp = it->second;
             auto zpPrc = zp->getPrecision();
-            // Under dynamic quantization oneDNN requires the zero-point dtype to exactly equal
-            // the (raw) weight dtype (wei_zp_dt == orig_wei_dt); the generic "fall back to i32"
-            // mapping used for plain weight decompression does not satisfy that and would make
-            // primitive descriptor creation silently fail (dispatch to "unimplemented").
+            // The dynamic-quantization path hands oneDNN an s8 src x int4/int8 weight matmul with
+            // grouped scales, which oneDNN treats as "int8 grouped quantization" (it has no notion of
+            // dynamic quantization itself). In that mode brgemm_matmul requires the weight zero-point
+            // dtype to equal the raw weight dtype (wei_zp_dt == orig_wei_dt, see
+            // brgemm_matmul_utils.cpp); the generic "fall back to i32" mapping used for plain weight
+            // decompression does not satisfy that and would make primitive descriptor creation
+            // silently fail (dispatch to "unimplemented").
             // TODO: clarify oneDNN requirements on ZP precision for the non-dynQuant case.
             auto dstPrc = dynQuant ? weiDesc->getPrecision() : (any_of(zpPrc, i32, i8, u8, i4, u4) ? zpPrc : i32);
             dnnlpoc.appendDecompressionZeroPoints(zp, !weightsNonTransposed, dstPrc, normWeiDims);
@@ -336,14 +348,7 @@ static dnnl::matmul::primitive_desc createDescriptorInternalAsFc(const dnnl::mem
     auto weiDims = weightDesc.get_dims();
     std::swap(weiDims[weiDims.size() - 1], weiDims[weiDims.size() - 2]);
 
-    // weightDesc may already be padded with leading 1s to the activation rank (dynamic-shape dummy
-    // dims), so "no batch" means every dim before the last two is 1.
-    const bool weightsHaveNoBatch =
-        std::all_of(weiDims.begin(), weiDims.end() - 2, [](const dnnl::memory::dim d) {
-            return d == 1;
-        });
-    const bool collapseBatch =
-        collapseFcBatchIntoM(dynQuant, inputDesc.get_ndims(), weightsHaveNoBatch, biasDesc.is_zero());
+    const bool collapseBatch = collapseFcBatchIntoM(dynQuant, inputDesc.get_ndims(), weiDims, biasDesc.is_zero());
 
     const auto maxRank =
         collapseBatch ? 2
@@ -489,9 +494,13 @@ static primitive_desc createPrimitiveDesc(const dnnl::memory::desc& inputDesc,
 
         // None of the enumerated implementations is in implPriorities: fall back to oneDNN's own first choice
         // rather than returning an empty primitive_desc, like the branch below does (found ? prim_desc : first_desc).
+        // This is usually a reference implementation, and the chosen type becomes the default impl type of the
+        // shape-agnostic data, so it is logged to make such a slow fallback visible.
         if (prim_desc_w_priority.prim_desc) {
             return prim_desc_w_priority.prim_desc;
         }
+        DEBUG_LOG("No matmul implementation found in implPriorities, falling back to oneDNN's first choice: ",
+                  first_desc.impl_info_str());
         return std::move(first_desc);
     }
 
@@ -659,11 +668,12 @@ DnnlShapeAgnosticDataPtr DnnlMatMulPrimitive::createShapeAgnosticData(const MatM
 
     const bool dynQuant = attrs.dynamicQuantizationGroupSize != 0;
     // useWeightsDecompressionImpl() cannot distinguish the dynamic-quant path from plain weight
-    // decompression by node-level precision alone (both are f32/bf16 src x u4/i4/u8/i8 wei);
-    // createPrimitiveAttrs() forces it back to false internally for dynQuant, but it must also be
-    // suppressed here since it also selects wdt=weightDesc dtype in createDescriptorInternalAsFc
-    // - which happens to be the same choice dynQuant makes, so no behavior difference there.
-    const auto useWeightsDecompression = useWeightsDecompressionImpl(srcDesc->getPrecision(), weiDesc->getPrecision());
+    // decompression by node-level precision alone (both are f32/bf16 src x u4/i4/u8/i8 wei), so it is
+    // suppressed for dynQuant here, the same way createPrimitiveAttrs() and the DnnlMatMulPrimitive
+    // constructor do. (createDescriptorInternalAsFc() checks dynQuant first, so the weight dtype it picks
+    // would be the same either way.)
+    const auto useWeightsDecompression =
+        useWeightsDecompressionImpl(srcDesc->getPrecision(), weiDesc->getPrecision()) && !dynQuant;
     const auto postOpData =
         createPrimitiveAttrs(attrs, memory, context, useWeightsDecompression, attrs.weightsNonTransposed);
 

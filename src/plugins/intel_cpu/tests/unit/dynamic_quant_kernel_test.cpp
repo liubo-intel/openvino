@@ -112,7 +112,7 @@ INSTANTIATE_TEST_SUITE_P(
                       DynamicQuantParams{ov::element::Type_t::f32, 1, 4096, 128},
                       DynamicQuantParams{ov::element::Type_t::f32, 4, 4096, 256}));
 
-TEST(DynamicQuantKernelTest, AllZeroGroupUsesFallbackScale) {
+TEST(DynamicQuantKernelEdgeTest, AllZeroGroupUsesFallbackScale) {
     const size_t M = 2;
     const size_t K = 16;
     const size_t groupSize = 16;
@@ -132,8 +132,10 @@ TEST(DynamicQuantKernelTest, AllZeroGroupUsesFallbackScale) {
     }
 }
 
-TEST(DynamicQuantKernelTest, ClampsToInt8Range) {
-    // A single huge outlier in an otherwise-small group must clamp to [-128, 127], not overflow.
+TEST(DynamicQuantKernelEdgeTest, OutlierMapsToInt8Boundary) {
+    // A single huge outlier in an otherwise-small group sets the group scale, so it maps to the int8 boundary
+    // (+-127, the clamp only guards against reciprocal rounding) while the small values collapse to ~0; nothing
+    // may wrap around outside [-128, 127].
     const size_t M = 1;
     const size_t K = 16;
     const size_t groupSize = 16;
